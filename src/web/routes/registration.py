@@ -19,6 +19,12 @@ from ...core.register import RegistrationEngine, RegistrationResult
 from ...services import EmailServiceFactory, EmailServiceType
 from ...config.settings import get_settings
 from ..task_manager import task_manager
+from .registration_selection import (
+    RegistrationSelectionRequest,
+    build_service_options,
+    normalize_email_service_config,
+    resolve_email_service_for_registration,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -71,12 +77,17 @@ class RegistrationTaskCreate(BaseModel):
     proxy: Optional[str] = None
     email_service_config: Optional[dict] = None
     email_service_id: Optional[int] = None
+    random_email_service: bool = False
+    random_outlook_account: bool = False
+    random_domain: bool = False
+    selected_email_addresses: List[str] = Field(default_factory=list)
+    selected_domains: List[str] = Field(default_factory=list)
     auto_upload_cpa: bool = False
-    cpa_service_ids: List[int] = []  # 指定 CPA 服务 ID 列表，空则取第一个启用的
+    cpa_service_ids: List[int] = Field(default_factory=list)  # 指定 CPA 服务 ID 列表，空则取第一个启用的
     auto_upload_sub2api: bool = False
-    sub2api_service_ids: List[int] = []  # 指定 Sub2API 服务 ID 列表
+    sub2api_service_ids: List[int] = Field(default_factory=list)  # 指定 Sub2API 服务 ID 列表
     auto_upload_tm: bool = False
-    tm_service_ids: List[int] = []  # 指定 TM 服务 ID 列表
+    tm_service_ids: List[int] = Field(default_factory=list)  # 指定 TM 服务 ID 列表
 
 
 class BatchRegistrationRequest(BaseModel):
@@ -86,16 +97,21 @@ class BatchRegistrationRequest(BaseModel):
     proxy: Optional[str] = None
     email_service_config: Optional[dict] = None
     email_service_id: Optional[int] = None
+    random_email_service: bool = False
+    random_outlook_account: bool = False
+    random_domain: bool = False
+    selected_email_addresses: List[str] = Field(default_factory=list)
+    selected_domains: List[str] = Field(default_factory=list)
     interval_min: int = 5
     interval_max: int = 30
     concurrency: int = 1
     mode: str = "pipeline"
     auto_upload_cpa: bool = False
-    cpa_service_ids: List[int] = []
+    cpa_service_ids: List[int] = Field(default_factory=list)
     auto_upload_sub2api: bool = False
-    sub2api_service_ids: List[int] = []
+    sub2api_service_ids: List[int] = Field(default_factory=list)
     auto_upload_tm: bool = False
-    tm_service_ids: List[int] = []
+    tm_service_ids: List[int] = Field(default_factory=list)
 
 
 class RegistrationTaskResponse(BaseModel):
@@ -200,28 +216,30 @@ def _normalize_email_service_config(
     proxy_url: Optional[str] = None
 ) -> dict:
     """按服务类型兼容旧字段名，避免不同服务的配置键互相污染。"""
-    normalized = config.copy() if config else {}
-
-    if 'api_url' in normalized and 'base_url' not in normalized:
-        normalized['base_url'] = normalized.pop('api_url')
-
-    if service_type == EmailServiceType.MOE_MAIL:
-        if 'domain' in normalized and 'default_domain' not in normalized:
-            normalized['default_domain'] = normalized.pop('domain')
-    elif service_type in (EmailServiceType.TEMP_MAIL, EmailServiceType.FREEMAIL):
-        if 'default_domain' in normalized and 'domain' not in normalized:
-            normalized['domain'] = normalized.pop('default_domain')
-    elif service_type == EmailServiceType.DUCK_MAIL:
-        if 'domain' in normalized and 'default_domain' not in normalized:
-            normalized['default_domain'] = normalized.pop('domain')
-
-    if proxy_url and 'proxy_url' not in normalized:
-        normalized['proxy_url'] = proxy_url
-
-    return normalized
+    return normalize_email_service_config(service_type, config, proxy_url)
 
 
-def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: Optional[str], email_service_config: Optional[dict], email_service_id: Optional[int] = None, log_prefix: str = "", batch_id: str = "", auto_upload_cpa: bool = False, cpa_service_ids: List[int] = None, auto_upload_sub2api: bool = False, sub2api_service_ids: List[int] = None, auto_upload_tm: bool = False, tm_service_ids: List[int] = None):
+def _run_sync_registration_task(
+    task_uuid: str,
+    email_service_type: str,
+    proxy: Optional[str],
+    email_service_config: Optional[dict],
+    email_service_id: Optional[int] = None,
+    random_email_service: bool = False,
+    random_outlook_account: bool = False,
+    random_domain: bool = False,
+    selected_email_addresses: List[str] = None,
+    selected_domains: List[str] = None,
+    selection_index: int = 0,
+    log_prefix: str = "",
+    batch_id: str = "",
+    auto_upload_cpa: bool = False,
+    cpa_service_ids: List[int] = None,
+    auto_upload_sub2api: bool = False,
+    sub2api_service_ids: List[int] = None,
+    auto_upload_tm: bool = False,
+    tm_service_ids: List[int] = None,
+):
     """
     在线程池中执行的同步注册任务
 
@@ -262,137 +280,39 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
             # 更新任务的代理记录
             crud.update_registration_task(db, task_uuid, proxy=actual_proxy_url)
 
-            # 创建邮箱服务
-            service_type = EmailServiceType(email_service_type)
-            settings = get_settings()
+            log_callback = task_manager.create_log_callback(task_uuid, prefix=log_prefix, batch_id=batch_id)
+            selection = RegistrationSelectionRequest(
+                random_email_service=random_email_service,
+                random_outlook_account=random_outlook_account,
+                random_domain=random_domain,
+                selected_email_addresses=selected_email_addresses or [],
+                selected_domains=selected_domains or [],
+                selection_index=selection_index,
+            )
+            resolved_service = resolve_email_service_for_registration(
+                db=db,
+                service_type=EmailServiceType(email_service_type),
+                requested_service_id=email_service_id,
+                fallback_config=email_service_config,
+                proxy_url=actual_proxy_url,
+                selection=selection,
+                log_callback=log_callback,
+            )
 
-            # 优先使用数据库中配置的邮箱服务
-            if email_service_id:
-                from ...database.models import EmailService as EmailServiceModel
-                db_service = db.query(EmailServiceModel).filter(
-                    EmailServiceModel.id == email_service_id,
-                    EmailServiceModel.enabled == True
-                ).first()
+            if resolved_service.email_service_id:
+                crud.update_registration_task(
+                    db,
+                    task_uuid,
+                    email_service_id=resolved_service.email_service_id,
+                )
 
-                if db_service:
-                    service_type = EmailServiceType(db_service.service_type)
-                    config = _normalize_email_service_config(service_type, db_service.config, actual_proxy_url)
-                    # 更新任务关联的邮箱服务
-                    crud.update_registration_task(db, task_uuid, email_service_id=db_service.id)
-                    logger.info(f"使用数据库邮箱服务: {db_service.name} (ID: {db_service.id}, 类型: {service_type.value})")
-                else:
-                    raise ValueError(f"邮箱服务不存在或已禁用: {email_service_id}")
-            else:
-                # 使用默认配置或传入的配置
-                if service_type == EmailServiceType.TEMPMAIL:
-                    config = {
-                        "base_url": settings.tempmail_base_url,
-                        "timeout": settings.tempmail_timeout,
-                        "max_retries": settings.tempmail_max_retries,
-                        "proxy_url": actual_proxy_url,
-                    }
-                elif service_type == EmailServiceType.MOE_MAIL:
-                    # 检查数据库中是否有可用的自定义域名服务
-                    from ...database.models import EmailService as EmailServiceModel
-                    db_service = db.query(EmailServiceModel).filter(
-                        EmailServiceModel.service_type == "moe_mail",
-                        EmailServiceModel.enabled == True
-                    ).order_by(EmailServiceModel.priority.asc()).first()
-
-                    if db_service and db_service.config:
-                        config = _normalize_email_service_config(service_type, db_service.config, actual_proxy_url)
-                        crud.update_registration_task(db, task_uuid, email_service_id=db_service.id)
-                        logger.info(f"使用数据库自定义域名服务: {db_service.name}")
-                    elif settings.custom_domain_base_url and settings.custom_domain_api_key:
-                        config = {
-                            "base_url": settings.custom_domain_base_url,
-                            "api_key": settings.custom_domain_api_key.get_secret_value() if settings.custom_domain_api_key else "",
-                            "proxy_url": actual_proxy_url,
-                        }
-                    else:
-                        raise ValueError("没有可用的自定义域名邮箱服务，请先在设置中配置")
-                elif service_type == EmailServiceType.OUTLOOK:
-                    # 检查数据库中是否有可用的 Outlook 账户
-                    from ...database.models import EmailService as EmailServiceModel, Account
-                    # 获取所有启用的 Outlook 服务
-                    outlook_services = db.query(EmailServiceModel).filter(
-                        EmailServiceModel.service_type == "outlook",
-                        EmailServiceModel.enabled == True
-                    ).order_by(EmailServiceModel.priority.asc()).all()
-
-                    if not outlook_services:
-                        raise ValueError("没有可用的 Outlook 账户，请先在设置中导入账户")
-
-                    # 找到一个未注册的 Outlook 账户
-                    selected_service = None
-                    for svc in outlook_services:
-                        email = svc.config.get("email") if svc.config else None
-                        if not email:
-                            continue
-                        # 检查是否已在 accounts 表中注册
-                        existing = db.query(Account).filter(Account.email == email).first()
-                        if not existing:
-                            selected_service = svc
-                            logger.info(f"选择未注册的 Outlook 账户: {email}")
-                            break
-                        else:
-                            logger.info(f"跳过已注册的 Outlook 账户: {email}")
-
-                    if selected_service and selected_service.config:
-                        config = selected_service.config.copy()
-                        crud.update_registration_task(db, task_uuid, email_service_id=selected_service.id)
-                        logger.info(f"使用数据库 Outlook 账户: {selected_service.name}")
-                    else:
-                        raise ValueError("所有 Outlook 账户都已注册过 OpenAI 账号，请添加新的 Outlook 账户")
-                elif service_type == EmailServiceType.DUCK_MAIL:
-                    from ...database.models import EmailService as EmailServiceModel
-
-                    db_service = db.query(EmailServiceModel).filter(
-                        EmailServiceModel.service_type == "duck_mail",
-                        EmailServiceModel.enabled == True
-                    ).order_by(EmailServiceModel.priority.asc()).first()
-
-                    if db_service and db_service.config:
-                        config = _normalize_email_service_config(service_type, db_service.config, actual_proxy_url)
-                        crud.update_registration_task(db, task_uuid, email_service_id=db_service.id)
-                        logger.info(f"使用数据库 DuckMail 服务: {db_service.name}")
-                    else:
-                        raise ValueError("没有可用的 DuckMail 邮箱服务，请先在邮箱服务页面添加服务")
-                elif service_type == EmailServiceType.FREEMAIL:
-                    from ...database.models import EmailService as EmailServiceModel
-
-                    db_service = db.query(EmailServiceModel).filter(
-                        EmailServiceModel.service_type == "freemail",
-                        EmailServiceModel.enabled == True
-                    ).order_by(EmailServiceModel.priority.asc()).first()
-
-                    if db_service and db_service.config:
-                        config = _normalize_email_service_config(service_type, db_service.config, actual_proxy_url)
-                        crud.update_registration_task(db, task_uuid, email_service_id=db_service.id)
-                        logger.info(f"使用数据库 Freemail 服务: {db_service.name}")
-                    else:
-                        raise ValueError("没有可用的 Freemail 邮箱服务，请先在邮箱服务页面添加服务")
-                elif service_type == EmailServiceType.IMAP_MAIL:
-                    from ...database.models import EmailService as EmailServiceModel
-
-                    db_service = db.query(EmailServiceModel).filter(
-                        EmailServiceModel.service_type == "imap_mail",
-                        EmailServiceModel.enabled == True
-                    ).order_by(EmailServiceModel.priority.asc()).first()
-
-                    if db_service and db_service.config:
-                        config = _normalize_email_service_config(service_type, db_service.config, actual_proxy_url)
-                        crud.update_registration_task(db, task_uuid, email_service_id=db_service.id)
-                        logger.info(f"使用数据库 IMAP 邮箱服务: {db_service.name}")
-                    else:
-                        raise ValueError("没有可用的 IMAP 邮箱服务，请先在邮箱服务中添加")
-                else:
-                    config = email_service_config or {}
-
-            email_service = EmailServiceFactory.create(service_type, config)
+            email_service = EmailServiceFactory.create(
+                resolved_service.service_type,
+                resolved_service.config,
+                name=resolved_service.service_name,
+            )
 
             # 创建注册引擎 - 使用 TaskManager 的日志回调
-            log_callback = task_manager.create_log_callback(task_uuid, prefix=log_prefix, batch_id=batch_id)
 
             engine = RegistrationEngine(
                 email_service=email_service,
@@ -538,7 +458,27 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                 pass
 
 
-async def run_registration_task(task_uuid: str, email_service_type: str, proxy: Optional[str], email_service_config: Optional[dict], email_service_id: Optional[int] = None, log_prefix: str = "", batch_id: str = "", auto_upload_cpa: bool = False, cpa_service_ids: List[int] = None, auto_upload_sub2api: bool = False, sub2api_service_ids: List[int] = None, auto_upload_tm: bool = False, tm_service_ids: List[int] = None):
+async def run_registration_task(
+    task_uuid: str,
+    email_service_type: str,
+    proxy: Optional[str],
+    email_service_config: Optional[dict],
+    email_service_id: Optional[int] = None,
+    random_email_service: bool = False,
+    random_outlook_account: bool = False,
+    random_domain: bool = False,
+    selected_email_addresses: List[str] = None,
+    selected_domains: List[str] = None,
+    selection_index: int = 0,
+    log_prefix: str = "",
+    batch_id: str = "",
+    auto_upload_cpa: bool = False,
+    cpa_service_ids: List[int] = None,
+    auto_upload_sub2api: bool = False,
+    sub2api_service_ids: List[int] = None,
+    auto_upload_tm: bool = False,
+    tm_service_ids: List[int] = None,
+):
     """
     异步执行注册任务
 
@@ -563,6 +503,12 @@ async def run_registration_task(task_uuid: str, email_service_type: str, proxy: 
             proxy,
             email_service_config,
             email_service_id,
+            random_email_service,
+            random_outlook_account,
+            random_domain,
+            selected_email_addresses or [],
+            selected_domains or [],
+            selection_index,
             log_prefix,
             batch_id,
             auto_upload_cpa,
@@ -616,6 +562,11 @@ async def run_batch_parallel(
     proxy: Optional[str],
     email_service_config: Optional[dict],
     email_service_id: Optional[int],
+    random_email_service: bool,
+    random_outlook_account: bool,
+    random_domain: bool,
+    selected_email_addresses: List[str],
+    selected_domains: List[str],
     concurrency: int,
     auto_upload_cpa: bool = False,
     cpa_service_ids: List[int] = None,
@@ -638,6 +589,8 @@ async def run_batch_parallel(
         async with semaphore:
             await run_registration_task(
                 uuid, email_service_type, proxy, email_service_config, email_service_id,
+                random_email_service, random_outlook_account, random_domain,
+                selected_email_addresses, selected_domains, idx,
                 log_prefix=prefix, batch_id=batch_id,
                 auto_upload_cpa=auto_upload_cpa, cpa_service_ids=cpa_service_ids or [],
                 auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids or [],
@@ -680,6 +633,11 @@ async def run_batch_pipeline(
     proxy: Optional[str],
     email_service_config: Optional[dict],
     email_service_id: Optional[int],
+    random_email_service: bool,
+    random_outlook_account: bool,
+    random_domain: bool,
+    selected_email_addresses: List[str],
+    selected_domains: List[str],
     interval_min: int,
     interval_max: int,
     concurrency: int,
@@ -704,6 +662,8 @@ async def run_batch_pipeline(
         try:
             await run_registration_task(
                 uuid, email_service_type, proxy, email_service_config, email_service_id,
+                random_email_service, random_outlook_account, random_domain,
+                selected_email_addresses, selected_domains, idx,
                 log_prefix=pfx, batch_id=batch_id,
                 auto_upload_cpa=auto_upload_cpa, cpa_service_ids=cpa_service_ids or [],
                 auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids or [],
@@ -769,8 +729,13 @@ async def run_batch_registration(
     proxy: Optional[str],
     email_service_config: Optional[dict],
     email_service_id: Optional[int],
-    interval_min: int,
-    interval_max: int,
+    random_email_service: bool = False,
+    random_outlook_account: bool = False,
+    random_domain: bool = False,
+    selected_email_addresses: List[str] = None,
+    selected_domains: List[str] = None,
+    interval_min: int = 5,
+    interval_max: int = 30,
     concurrency: int = 1,
     mode: str = "pipeline",
     auto_upload_cpa: bool = False,
@@ -784,7 +749,10 @@ async def run_batch_registration(
     if mode == "parallel":
         await run_batch_parallel(
             batch_id, task_uuids, email_service_type, proxy,
-            email_service_config, email_service_id, concurrency,
+            email_service_config, email_service_id,
+            random_email_service, random_outlook_account, random_domain,
+            selected_email_addresses or [], selected_domains or [],
+            concurrency,
             auto_upload_cpa=auto_upload_cpa, cpa_service_ids=cpa_service_ids,
             auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids,
             auto_upload_tm=auto_upload_tm, tm_service_ids=tm_service_ids,
@@ -793,6 +761,8 @@ async def run_batch_registration(
         await run_batch_pipeline(
             batch_id, task_uuids, email_service_type, proxy,
             email_service_config, email_service_id,
+            random_email_service, random_outlook_account, random_domain,
+            selected_email_addresses or [], selected_domains or [],
             interval_min, interval_max, concurrency,
             auto_upload_cpa=auto_upload_cpa, cpa_service_ids=cpa_service_ids,
             auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids,
@@ -841,6 +811,12 @@ async def start_registration(
         request.proxy,
         request.email_service_config,
         request.email_service_id,
+        request.random_email_service,
+        request.random_outlook_account,
+        request.random_domain,
+        request.selected_email_addresses,
+        request.selected_domains,
+        0,
         "",
         "",
         request.auto_upload_cpa,
@@ -916,6 +892,11 @@ async def start_batch_registration(
         request.proxy,
         request.email_service_config,
         request.email_service_id,
+        request.random_email_service,
+        request.random_outlook_account,
+        request.random_domain,
+        request.selected_email_addresses,
+        request.selected_domains,
         request.interval_min,
         request.interval_max,
         request.concurrency,
@@ -1258,6 +1239,25 @@ async def get_available_email_services():
         result["imap_mail"]["available"] = len(imap_mail_services) > 0
 
     return result
+
+
+@router.get("/service-options")
+async def get_registration_service_options(
+    service_type: str = Query(...),
+    service_id: Optional[int] = Query(None),
+):
+    """获取注册页所需的服务候选项。"""
+    try:
+        email_service_type = EmailServiceType(service_type)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"无效的邮箱服务类型: {service_type}")
+
+    with get_db() as db:
+        return build_service_options(
+            db=db,
+            service_type=email_service_type,
+            service_id=service_id,
+        )
 
 
 # ============== Outlook 批量注册 API ==============

@@ -130,6 +130,20 @@
         .msd-item input[type=checkbox] { margin: 0; cursor: pointer; }
         .msd-empty { padding: 8px 12px; color: var(--text-muted); font-size: 0.8rem; }
 
+        .selection-panel {
+            padding: var(--spacing-sm);
+            border: 1px solid var(--border-light);
+            border-radius: var(--radius);
+            background: var(--surface-hover);
+        }
+
+        .selection-note {
+            margin-top: var(--spacing-xs);
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            line-height: 1.5;
+        }
+
         /* 响应式 */
         @media (max-width: 1024px) {
             .two-column-layout {
@@ -154,6 +168,7 @@
                 <a href="/accounts" class="nav-link">账号管理</a>
                 <a href="/email-services" class="nav-link">邮箱服务</a>
                 <a href="/payment" class="nav-link">支付</a>
+                <a href="/team" class="nav-link">Team 创建</a>
                 <a href="/settings" class="nav-link">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
             </div>
@@ -184,6 +199,49 @@
                                         <option value="imap_mail">IMAP 邮箱</option>
                                         <option value="outlook_batch:all">Outlook 批量注册</option>
                                     </select>
+                                </div>
+
+                                <div class="form-group" id="registration-selection-group">
+                                    <label style="font-weight: 500; margin-bottom: var(--spacing-xs); display: block;">选择策略</label>
+                                    <div class="selection-panel">
+                                        <label style="display: flex; align-items: center; gap: var(--spacing-sm); cursor: pointer;">
+                                            <input type="checkbox" id="random-email-service">
+                                            <span>随机选同类型邮箱服务</span>
+                                        </label>
+                                        <label id="random-outlook-account-group" style="display: none; align-items: center; gap: var(--spacing-sm); cursor: pointer; margin-top: 6px;">
+                                            <input type="checkbox" id="random-outlook-account">
+                                            <span>随机选 Outlook 账号</span>
+                                        </label>
+                                        <label id="random-domain-group" style="display: none; align-items: center; gap: var(--spacing-sm); cursor: pointer; margin-top: 6px;">
+                                            <input type="checkbox" id="random-domain">
+                                            <span>随机选域名</span>
+                                        </label>
+                                        <div id="service-options-section" style="display: none; margin-top: var(--spacing-sm);">
+                                            <div style="display: flex; justify-content: space-between; align-items: center; gap: var(--spacing-sm); margin-bottom: var(--spacing-xs);">
+                                                <span style="font-size: 0.8125rem; font-weight: 500;">地址 / 域名候选</span>
+                                                <button type="button" class="btn btn-ghost btn-sm" id="refresh-service-options-btn">刷新</button>
+                                            </div>
+                                            <div id="service-options-note" class="selection-note" style="display: none;"></div>
+                                            <div class="form-group" id="domain-select-group" style="display: none; margin-bottom: var(--spacing-sm);">
+                                                <label style="font-size: 0.8125rem;">可选域名</label>
+                                                <div class="multi-select-dropdown" id="domain-select"></div>
+                                                <div style="display: flex; gap: var(--spacing-xs); margin-top: var(--spacing-xs);">
+                                                    <button type="button" class="btn btn-ghost btn-sm" id="domain-select-all-btn">全选</button>
+                                                    <button type="button" class="btn btn-ghost btn-sm" id="domain-select-clear-btn">清空</button>
+                                                </div>
+                                                <div class="selection-note">可选择部分或全部域名。批量模式下未开启随机时会按所选顺序轮转。</div>
+                                            </div>
+                                            <div class="form-group" id="email-address-select-group" style="display: none; margin-bottom: 0;">
+                                                <label style="font-size: 0.8125rem;">可选邮箱地址</label>
+                                                <div class="multi-select-dropdown" id="email-address-select"></div>
+                                                <div style="display: flex; gap: var(--spacing-xs); margin-top: var(--spacing-xs);">
+                                                    <button type="button" class="btn btn-ghost btn-sm" id="email-address-select-all-btn">全选</button>
+                                                    <button type="button" class="btn btn-ghost btn-sm" id="email-address-select-clear-btn">清空</button>
+                                                </div>
+                                                <div class="selection-note">会从邮箱 API 读取已有地址，你可以只选一部分，也可以全选。</div>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
 
                                 <!-- Outlook 批量注册区域 -->

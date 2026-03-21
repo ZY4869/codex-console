@@ -224,6 +224,21 @@ class TempMailService(BaseEmailService):
             - jwt: 用户级 JWT token
             - service_id: 同 email（用作标识）
         """
+        request_config = {**self.config, **(config or {})}
+        existing_email = str(request_config.get("existing_email") or "").strip()
+        if existing_email:
+            cached = self._email_cache.get(existing_email, {})
+            email_info = {
+                "email": existing_email,
+                "jwt": cached.get("jwt", ""),
+                "service_id": existing_email,
+                "id": existing_email,
+                "created_at": cached.get("created_at") or time.time(),
+            }
+            self._email_cache[existing_email] = email_info
+            self.update_status(True)
+            return email_info
+
         import random
         import string
 
@@ -406,6 +421,66 @@ class TempMailService(BaseEmailService):
             logger.warning(f"列出 TempMail 邮箱失败: {e}")
             self.update_status(False, e)
             return list(self._email_cache.values())
+
+    def list_domains(self) -> List[str]:
+        domain = str(self.config.get("domain") or "").strip().lstrip("@")
+        return [domain] if domain else []
+
+    def get_email_messages(self, email_id: str, **kwargs) -> List[Dict[str, Any]]:
+        """获取指定 TempMail 邮箱的邮件列表。"""
+        try:
+            response = self._make_request(
+                "GET",
+                "/admin/mails",
+                params={
+                    "limit": kwargs.get("limit", 20),
+                    "offset": kwargs.get("offset", 0),
+                    "address": email_id,
+                },
+            )
+            mails = response.get("results", [])
+            if not isinstance(mails, list):
+                return []
+
+            messages = []
+            for mail in mails:
+                parsed = self._extract_mail_fields(mail)
+                messages.append({
+                    "id": mail.get("id"),
+                    "from": parsed["sender"],
+                    "subject": parsed["subject"],
+                    "content": parsed["body"],
+                    "received_at": mail.get("createdAt") or mail.get("created_at"),
+                    "raw_data": mail,
+                })
+            return messages
+        except Exception as e:
+            logger.warning(f"获取 TempMail 邮件列表失败: {e}")
+            return []
+
+    def get_message_content(self, email_id: str, message_id: str) -> Optional[Dict[str, Any]]:
+        """获取 TempMail 邮件正文。"""
+        try:
+            response = self._make_request(
+                "GET",
+                "/admin/mails",
+                params={"limit": 100, "offset": 0, "address": email_id},
+            )
+            mails = response.get("results", [])
+            for mail in mails:
+                if str(mail.get("id")) != str(message_id):
+                    continue
+                parsed = self._extract_mail_fields(mail)
+                return {
+                    "id": message_id,
+                    "content": parsed["body"],
+                    "html": mail.get("html", ""),
+                    "subject": parsed["subject"],
+                    "from": parsed["sender"],
+                }
+        except Exception as e:
+            logger.warning(f"获取 TempMail 邮件详情失败: {e}")
+        return None
 
     def delete_email(self, email_id: str) -> bool:
         """

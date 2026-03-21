@@ -18,6 +18,7 @@ def upload_to_team_manager(
     account: Account,
     api_url: str,
     api_key: str,
+    team_context: dict = None,
 ) -> Tuple[bool, str]:
     """
     上传单账号到 Team Manager（直连，不走代理）
@@ -46,6 +47,8 @@ def upload_to_team_manager(
         "client_id": account.client_id or "",
         "account_id": account.account_id or "",
     }
+    if team_context:
+        logger.info("Team Manager 单账号上传携带 Team 上下文: %s", team_context.get("team_task_uuid"))
 
     try:
         resp = cffi_requests.post(
@@ -74,6 +77,7 @@ def batch_upload_to_team_manager(
     account_ids: List[int],
     api_url: str,
     api_key: str,
+    team_context: dict = None,
 ) -> dict:
     """
     批量上传账号到 Team Manager（使用 batch 模式，一次请求提交所有账号）
@@ -86,6 +90,7 @@ def batch_upload_to_team_manager(
         "failed_count": 0,
         "skipped_count": 0,
         "details": [],
+        "team_context": team_context,
     }
 
     with get_db() as db:
@@ -127,6 +132,8 @@ def batch_upload_to_team_manager(
             "import_type": "batch",
             "content": "\n".join(lines),
         }
+        if team_context:
+            logger.info("Team Manager 批量上传携带 Team 上下文: %s", team_context.get("team_task_uuid"))
 
         try:
             resp = cffi_requests.post(

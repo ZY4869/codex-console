@@ -7,7 +7,17 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, desc, asc, func
 
-from .models import Account, EmailService, RegistrationTask, Setting, Proxy, CpaService, Sub2ApiService
+from .models import (
+    Account,
+    EmailService,
+    RegistrationTask,
+    Setting,
+    Proxy,
+    CpaService,
+    Sub2ApiService,
+    TeamTask,
+    TeamMember,
+)
 
 
 # ============================================================================
@@ -327,8 +337,142 @@ def delete_registration_task(db: Session, task_uuid: str) -> bool:
 
 
 # 为 API 路由添加别名
+def create_team_task(
+    db: Session,
+    task_uuid: str,
+    email_service_id: Optional[int],
+    workspace_name: str = "MyTeam",
+    proxy: Optional[str] = None,
+    email_domain: Optional[str] = None,
+    upload_config: Optional[Dict[str, Any]] = None
+) -> TeamTask:
+    """创建 Team 编排任务。"""
+    team_task = TeamTask(
+        task_uuid=task_uuid,
+        email_service_id=email_service_id,
+        workspace_name=workspace_name,
+        proxy=proxy,
+        email_domain=email_domain,
+        upload_config=upload_config or {},
+        status="pending",
+    )
+    db.add(team_task)
+    db.commit()
+    db.refresh(team_task)
+    return team_task
+
+
+def get_team_task_by_uuid(db: Session, task_uuid: str) -> Optional[TeamTask]:
+    """根据 UUID 获取 Team 任务。"""
+    return db.query(TeamTask).filter(TeamTask.task_uuid == task_uuid).first()
+
+
+def list_team_tasks(
+    db: Session,
+    status: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100
+) -> List[TeamTask]:
+    """分页获取 Team 任务。"""
+    query = db.query(TeamTask)
+    if status:
+        query = query.filter(TeamTask.status == status)
+    return query.order_by(desc(TeamTask.created_at)).offset(skip).limit(limit).all()
+
+
+def update_team_task(db: Session, task_uuid: str, **kwargs) -> Optional[TeamTask]:
+    """更新 Team 任务。"""
+    team_task = get_team_task_by_uuid(db, task_uuid)
+    if not team_task:
+        return None
+
+    for key, value in kwargs.items():
+        if hasattr(team_task, key):
+            setattr(team_task, key, value)
+
+    db.commit()
+    db.refresh(team_task)
+    return team_task
+
+
+def append_team_task_log(db: Session, task_uuid: str, log_message: str) -> bool:
+    """追加 Team 任务日志。"""
+    team_task = get_team_task_by_uuid(db, task_uuid)
+    if not team_task:
+        return False
+
+    team_task.logs = f"{team_task.logs}\n{log_message}" if team_task.logs else log_message
+    db.commit()
+    return True
+
+
+def delete_team_task(db: Session, task_uuid: str) -> bool:
+    """删除 Team 任务。"""
+    team_task = get_team_task_by_uuid(db, task_uuid)
+    if not team_task:
+        return False
+
+    db.delete(team_task)
+    db.commit()
+    return True
+
+
+def create_team_member(
+    db: Session,
+    team_task_id: int,
+    order_index: int,
+    role: str,
+    registration_task_uuid: Optional[str] = None,
+    account_id: Optional[int] = None
+) -> TeamMember:
+    """创建 Team 成员记录。"""
+    member = TeamMember(
+        team_task_id=team_task_id,
+        order_index=order_index,
+        role=role,
+        registration_task_uuid=registration_task_uuid,
+        account_id=account_id,
+        invitation_status="pending",
+    )
+    db.add(member)
+    db.commit()
+    db.refresh(member)
+    return member
+
+
+def get_team_member_by_id(db: Session, member_id: int) -> Optional[TeamMember]:
+    """根据 ID 获取 Team 成员。"""
+    return db.query(TeamMember).filter(TeamMember.id == member_id).first()
+
+
+def get_team_members(db: Session, team_task_id: int) -> List[TeamMember]:
+    """获取任务下的成员列表。"""
+    return (
+        db.query(TeamMember)
+        .filter(TeamMember.team_task_id == team_task_id)
+        .order_by(asc(TeamMember.order_index))
+        .all()
+    )
+
+
+def update_team_member(db: Session, member_id: int, **kwargs) -> Optional[TeamMember]:
+    """更新 Team 成员。"""
+    member = get_team_member_by_id(db, member_id)
+    if not member:
+        return None
+
+    for key, value in kwargs.items():
+        if hasattr(member, key):
+            setattr(member, key, value)
+
+    db.commit()
+    db.refresh(member)
+    return member
+
+
 get_account = get_account_by_id
 get_registration_task = get_registration_task_by_uuid
+get_team_task = get_team_task_by_uuid
 
 
 # ============================================================================

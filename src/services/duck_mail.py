@@ -293,6 +293,32 @@ class DuckMailService(BaseEmailService):
     def list_emails(self, **kwargs) -> List[Dict[str, Any]]:
         return list(self._accounts_by_email.values())
 
+    def list_domains(self) -> List[str]:
+        try:
+            response = self._make_request(
+                "GET",
+                "/domains",
+                params={"page": 1},
+                use_api_key=bool(self.config.get("api_key")),
+            )
+            domains = response.get("hydra:member", [])
+            normalized: List[str] = []
+            for item in domains:
+                if isinstance(item, dict):
+                    value = item.get("domain") or item.get("name") or item.get("address")
+                else:
+                    value = item
+                value = str(value or "").strip().lstrip("@")
+                if value and value not in normalized:
+                    normalized.append(value)
+            if normalized:
+                return normalized
+        except Exception as e:
+            logger.debug(f"DuckMail 读取域名列表失败: {e}")
+
+        default_domain = str(self.config.get("default_domain") or "").strip().lstrip("@")
+        return [default_domain] if default_domain else []
+
     def delete_email(self, email_id: str) -> bool:
         account_info = self._get_account_info(email_id=email_id) or self._get_account_info(email=email_id)
         if not account_info:

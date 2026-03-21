@@ -116,6 +116,7 @@ def upload_to_cpa(
     proxy: str = None,
     api_url: str = None,
     api_token: str = None,
+    team_context: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
     """
     上传单个账号到 CPA 管理平台（不走代理）
@@ -149,6 +150,8 @@ def upload_to_cpa(
 
     filename = f"{token_data['email']}.json"
     file_content = json.dumps(token_data, ensure_ascii=False, indent=2).encode("utf-8")
+    if team_context:
+        logger.info("CPA 上传携带 Team 上下文: %s", team_context.get("team_task_uuid"))
 
     try:
         response = _post_cpa_auth_file_multipart(
@@ -185,6 +188,7 @@ def batch_upload_to_cpa(
     proxy: str = None,
     api_url: str = None,
     api_token: str = None,
+    team_context: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """
     批量上传账号到 CPA 管理平台
@@ -202,7 +206,8 @@ def batch_upload_to_cpa(
         "success_count": 0,
         "failed_count": 0,
         "skipped_count": 0,
-        "details": []
+        "details": [],
+        "team_context": team_context,
     }
 
     with get_db() as db:
@@ -234,7 +239,13 @@ def batch_upload_to_cpa(
             token_data = generate_token_json(account)
 
             # 上传
-            success, message = upload_to_cpa(token_data, proxy, api_url=api_url, api_token=api_token)
+            success, message = upload_to_cpa(
+                token_data,
+                proxy,
+                api_url=api_url,
+                api_token=api_token,
+                team_context=team_context,
+            )
 
             if success:
                 # 更新数据库状态

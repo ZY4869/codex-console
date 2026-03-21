@@ -227,3 +227,6 @@ class Proxy(Base):
             auth = f"{self.username}:{self.password}@"
 
         return f"{scheme}://{auth}{self.host}:{self.port}"
+
+
+from .team_models import TeamTask, TeamMember  # noqa: E402,F401

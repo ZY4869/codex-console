@@ -22,6 +22,7 @@ def upload_to_sub2api(
     api_key: str,
     concurrency: int = 3,
     priority: int = 50,
+    team_context: Optional[dict] = None,
 ) -> Tuple[bool, str]:
     """
     上传账号列表到 Sub2API 平台（不走代理）
@@ -97,6 +98,8 @@ def upload_to_sub2api(
         },
         "skip_default_group_bind": True,
     }
+    if team_context:
+        logger.info("Sub2API 上传携带 Team 上下文: %s", team_context.get("team_task_uuid"))
 
     url = api_url.rstrip("/") + "/api/v1/admin/accounts/data"
     headers = {
@@ -138,6 +141,7 @@ def batch_upload_to_sub2api(
     api_key: str,
     concurrency: int = 3,
     priority: int = 50,
+    team_context: Optional[dict] = None,
 ) -> dict:
     """
     批量上传指定 ID 的账号到 Sub2API 平台
@@ -149,7 +153,8 @@ def batch_upload_to_sub2api(
         "success_count": 0,
         "failed_count": 0,
         "skipped_count": 0,
-        "details": []
+        "details": [],
+        "team_context": team_context,
     }
 
     with get_db() as db:
@@ -169,7 +174,14 @@ def batch_upload_to_sub2api(
         if not accounts:
             return results
 
-        success, message = upload_to_sub2api(accounts, api_url, api_key, concurrency, priority)
+        success, message = upload_to_sub2api(
+            accounts,
+            api_url,
+            api_key,
+            concurrency,
+            priority,
+            team_context=team_context,
+        )
 
         if success:
             for acc in accounts:

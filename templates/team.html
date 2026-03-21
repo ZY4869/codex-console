@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Team 创建 - OpenAI 注册系统</title>
+    <link rel="stylesheet" href="/static/css/style.css?v={{ static_version }}">
+    <style>
+        .two-column-layout {
+            display: grid;
+            grid-template-columns: 340px 1fr;
+            gap: var(--spacing-lg);
+            align-items: start;
+        }
+        .left-panel {
+            position: sticky;
+            top: calc(60px + var(--spacing-lg));
+        }
+        .right-panel {
+            display: flex;
+            flex-direction: column;
+            gap: var(--spacing-lg);
+        }
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm);
+            margin-bottom: var(--spacing-sm);
+        }
+        .inline-actions {
+            display: flex;
+            gap: var(--spacing-sm);
+            flex-wrap: wrap;
+        }
+        .kv-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: var(--spacing-md);
+        }
+        .kv-item {
+            background: var(--surface-hover);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: var(--spacing-md);
+        }
+        .kv-item .label {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            margin-bottom: 4px;
+        }
+        .kv-item .value {
+            font-size: 0.875rem;
+            font-weight: 600;
+            word-break: break-all;
+        }
+        .progress-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: var(--spacing-sm);
+        }
+        .table-container table {
+            width: 100%;
+        }
+        .secret-line {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm);
+            margin-bottom: var(--spacing-sm);
+        }
+        .secret-line code {
+            flex: 1;
+            display: block;
+            background: var(--surface-hover);
+            border-radius: var(--radius-sm);
+            padding: 8px 10px;
+            overflow-x: auto;
+        }
+        .platform-select {
+            display: none;
+            margin-bottom: var(--spacing-md);
+        }
+        .platform-select.active {
+            display: block;
+        }
+        .upload-summary pre {
+            background: var(--surface-hover);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: var(--spacing-md);
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-size: 0.8125rem;
+        }
+        .empty-state {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+        }
+        @media (max-width: 1024px) {
+            .two-column-layout {
+                grid-template-columns: 1fr;
+            }
+            .left-panel {
+                position: static;
+            }
+            .kv-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <nav class="navbar">
+            <div class="nav-brand">
+                <h1>OpenAI 注册系统</h1>
+            </div>
+            <div class="nav-links">
+                <a href="/" class="nav-link">注册</a>
+                <a href="/accounts" class="nav-link">账号管理</a>
+                <a href="/email-services" class="nav-link">邮箱服务</a>
+                <a href="/payment" class="nav-link">支付</a>
+                <a href="/team" class="nav-link active">Team 创建</a>
+                <a href="/settings" class="nav-link">设置</a>
+                <a href="/logout" class="nav-link">退出</a>
+            </div>
+            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">主题</button>
+        </nav>
+
+        <main class="main-content">
+            <div class="page-header">
+                <h2>Team 创建</h2>
+                <p class="subtitle">注册 5 个同域名账号，等待手动升级 Team 后继续自动邀请、接受与整体上传。</p>
+            </div>
+
+            <div class="two-column-layout">
+                <div class="left-panel">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>创建配置</h3>
+                        </div>
+                        <div class="card-body">
+                            <form id="team-form">
+                                <div class="form-group">
+                                    <label for="team-email-service">邮箱服务</label>
+                                    <select id="team-email-service" required></select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="workspace-name">Team 名称</label>
+                                    <input id="workspace-name" type="text" value="MyTeam" maxlength="64">
+                                </div>
+                                <div class="form-group">
+                                    <label for="team-proxy">代理</label>
+                                    <input id="team-proxy" type="text" placeholder="留空则按系统代理策略选择">
+                                </div>
+
+                                <div class="form-group">
+                                    <label>上传平台</label>
+                                    <label class="checkbox-group">
+                                        <input id="auto-upload-sub2api" type="checkbox">
+                                        <span>Sub2API</span>
+                                    </label>
+                                    <div id="sub2api-select-wrap" class="platform-select">
+                                        <select id="sub2api-service-ids" multiple size="4"></select>
+                                    </div>
+                                    <label class="checkbox-group">
+                                        <input id="auto-upload-cpa" type="checkbox">
+                                        <span>CPA</span>
+                                    </label>
+                                    <div id="cpa-select-wrap" class="platform-select">
+                                        <select id="cpa-service-ids" multiple size="4"></select>
+                                    </div>
+                                    <label class="checkbox-group">
+                                        <input id="auto-upload-tm" type="checkbox">
+                                        <span>Team Manager</span>
+                                    </label>
+                                    <div id="tm-select-wrap" class="platform-select">
+                                        <select id="tm-service-ids" multiple size="4"></select>
+                                    </div>
+                                </div>
+
+                                <div class="inline-actions">
+                                    <button id="start-team-btn" class="btn btn-primary" type="submit">开始创建 Team</button>
+                                    <button id="cancel-team-btn" class="btn btn-danger" type="button" disabled>取消任务</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="right-panel">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>任务概览</h3>
+                        </div>
+                        <div class="card-body">
+                            <div class="kv-grid">
+                                <div class="kv-item">
+                                    <div class="label">任务 UUID</div>
+                                    <div class="value" id="task-id">-</div>
+                                </div>
+                                <div class="kv-item">
+                                    <div class="label">当前状态</div>
+                                    <div class="value"><span id="task-status-badge" class="status-badge pending">等待中</span></div>
+                                </div>
+                                <div class="kv-item">
+                                    <div class="label">邮箱域名</div>
+                                    <div class="value" id="task-email-domain">-</div>
+                                </div>
+                                <div class="kv-item">
+                                    <div class="label">Team 标识</div>
+                                    <div class="value" id="task-team-account-id">-</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>成员进度</h3>
+                        </div>
+                        <div class="card-body">
+                            <div class="progress-meta">
+                                <span id="member-progress-text">0 / 5</span>
+                                <span id="member-progress-stage">待开始</span>
+                            </div>
+                            <div class="progress-bar-container">
+                                <div id="member-progress-bar" class="progress-bar" style="width: 0%;"></div>
+                            </div>
+                            <div class="table-container" style="margin-top: var(--spacing-md);">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>序号</th>
+                                            <th>角色</th>
+                                            <th>邮箱</th>
+                                            <th>状态</th>
+                                            <th>工作区</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="team-members-body">
+                                        <tr><td colspan="5" class="empty-state">任务创建后会在这里显示 5 个成员。</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>主账号与订阅确认</h3>
+                        </div>
+                        <div class="card-body">
+                            <div id="main-account-empty" class="empty-state">主账号注册完成后，这里会展示凭据和 Team 支付链接入口。</div>
+                            <div id="main-account-panel" style="display: none;">
+                                <div class="secret-line">
+                                    <strong style="width: 88px;">邮箱</strong>
+                                    <code id="main-account-email">-</code>
+                                    <button class="btn btn-ghost btn-sm" data-copy-target="main-account-email" type="button">复制</button>
+                                </div>
+                                <div class="secret-line">
+                                    <strong style="width: 88px;">密码</strong>
+                                    <code id="main-account-password">-</code>
+                                    <button class="btn btn-ghost btn-sm" data-copy-target="main-account-password" type="button">复制</button>
+                                </div>
+                                <div class="secret-line">
+                                    <strong style="width: 88px;">Access Token</strong>
+                                    <code id="main-account-token">-</code>
+                                    <button class="btn btn-ghost btn-sm" data-copy-target="main-account-token" type="button">复制</button>
+                                </div>
+                                <div class="secret-line">
+                                    <strong style="width: 88px;">Session Token</strong>
+                                    <code id="main-account-session">-</code>
+                                    <button class="btn btn-ghost btn-sm" data-copy-target="main-account-session" type="button">复制</button>
+                                </div>
+                                <div class="inline-actions">
+                                    <button id="generate-payment-link-btn" class="btn btn-secondary" type="button" disabled>生成 Team 支付链接</button>
+                                    <button id="continue-team-btn" class="btn btn-primary" type="button" disabled>已完成 Team 订阅，继续</button>
+                                </div>
+                                <div style="margin-top: var(--spacing-md);">
+                                    <div class="label" style="margin-bottom: 6px; color: var(--text-secondary);">支付链接</div>
+                                    <code id="payment-link-output" style="display: block; min-height: 48px; white-space: pre-wrap;">-</code>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card upload-summary">
+                        <div class="card-header">
+                            <h3>上传结果</h3>
+                        </div>
+                        <div class="card-body">
+                            <pre id="upload-summary-output">暂无上传结果</pre>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>实时日志</h3>
+                            <button id="clear-team-log-btn" class="btn btn-ghost btn-sm" type="button">清空</button>
+                        </div>
+                        <div class="card-body">
+                            <div id="team-console-log" class="console-log"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/js/utils.js?v={{ static_version }}"></script>
+    <script src="/static/js/team.js?v={{ static_version }}"></script>
+</body>
+</html>

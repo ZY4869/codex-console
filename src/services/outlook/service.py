@@ -273,10 +273,21 @@ class OutlookService(BaseEmailService):
             self.update_status(False, EmailServiceError("没有可用的 Outlook 账户"))
             raise EmailServiceError("没有可用的 Outlook 账户")
 
-        # 轮询选择账户
-        with self._account_lock:
-            account = self.accounts[self._current_account_index]
-            self._current_account_index = (self._current_account_index + 1) % len(self.accounts)
+        request_config = {**self.config, **(config or {})}
+        existing_email = str(request_config.get("existing_email") or "").strip().lower()
+        account = None
+
+        if existing_email:
+            for candidate in self.accounts:
+                if candidate.email.lower() == existing_email:
+                    account = candidate
+                    break
+
+        if account is None:
+            # 轮询选择账户
+            with self._account_lock:
+                account = self.accounts[self._current_account_index]
+                self._current_account_index = (self._current_account_index + 1) % len(self.accounts)
 
         email_info = {
             "email": account.email,
@@ -402,6 +413,16 @@ class OutlookService(BaseEmailService):
             }
             for account in self.accounts
         ]
+
+    def list_domains(self) -> List[str]:
+        domains: List[str] = []
+        for account in self.accounts:
+            if "@" not in account.email:
+                continue
+            domain = account.email.split("@", 1)[1].strip().lower()
+            if domain and domain not in domains:
+                domains.append(domain)
+        return domains
 
     def delete_email(self, email_id: str) -> bool:
         """删除邮箱（Outlook 不支持删除账户）"""

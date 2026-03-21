@@ -18,13 +18,15 @@ let taskFinalStatus = null;  // 保存任务的最终状态
 let batchFinalStatus = null;  // 保存批量任务的最终状态
 let displayedLogs = new Set();  // 用于日志去重
 let toastShown = false;  // 标记是否已显示过 toast
+let currentServiceOptions = null;
 let availableServices = {
     tempmail: { available: true, services: [] },
     outlook: { available: false, services: [] },
     moe_mail: { available: false, services: [] },
     temp_mail: { available: false, services: [] },
     duck_mail: { available: false, services: [] },
-    freemail: { available: false, services: [] }
+    freemail: { available: false, services: [] },
+    imap_mail: { available: false, services: [] }
 };
 
 // WebSocket 相关变量
@@ -40,6 +42,23 @@ let activeBatchId = null;    // 当前活跃的批量任务 ID（用于页面重
 const elements = {
     form: document.getElementById('registration-form'),
     emailService: document.getElementById('email-service'),
+    registrationSelectionGroup: document.getElementById('registration-selection-group'),
+    randomEmailService: document.getElementById('random-email-service'),
+    randomOutlookAccountGroup: document.getElementById('random-outlook-account-group'),
+    randomOutlookAccount: document.getElementById('random-outlook-account'),
+    randomDomainGroup: document.getElementById('random-domain-group'),
+    randomDomain: document.getElementById('random-domain'),
+    serviceOptionsSection: document.getElementById('service-options-section'),
+    refreshServiceOptionsBtn: document.getElementById('refresh-service-options-btn'),
+    serviceOptionsNote: document.getElementById('service-options-note'),
+    domainSelectGroup: document.getElementById('domain-select-group'),
+    domainSelect: document.getElementById('domain-select'),
+    domainSelectAllBtn: document.getElementById('domain-select-all-btn'),
+    domainSelectClearBtn: document.getElementById('domain-select-clear-btn'),
+    emailAddressSelectGroup: document.getElementById('email-address-select-group'),
+    emailAddressSelect: document.getElementById('email-address-select'),
+    emailAddressSelectAllBtn: document.getElementById('email-address-select-all-btn'),
+    emailAddressSelectClearBtn: document.getElementById('email-address-select-clear-btn'),
     regMode: document.getElementById('reg-mode'),
     regModeGroup: document.getElementById('reg-mode-group'),
     batchCountGroup: document.getElementById('batch-count-group'),
@@ -185,6 +204,158 @@ function getSelectedServiceIds(container) {
     return Array.from(container.querySelectorAll('.msd-item input:checked')).map(cb => parseInt(cb.value));
 }
 
+function renderMultiSelect(container, items, emptyText = '暂无可选项') {
+    if (!container) return;
+
+    if (!items || items.length === 0) {
+        container.innerHTML = `<div class="msd-empty">${emptyText}</div>`;
+        return;
+    }
+
+    const itemHtml = items.map(item => `
+        <label class="msd-item">
+            <input type="checkbox" value="${escapeHtml(item.value)}" ${item.checked ? 'checked' : ''}>
+            <span>${escapeHtml(item.text)}</span>
+        </label>
+    `).join('');
+
+    container.innerHTML = `
+        <div class="msd-dropdown" id="${container.id}-dd">
+            <div class="msd-trigger" onclick="toggleMsd('${container.id}-dd')">
+                <span class="msd-label">未选择</span>
+                <span class="msd-arrow">▼</span>
+            </div>
+            <div class="msd-list">${itemHtml}</div>
+        </div>
+    `;
+
+    container.querySelectorAll('.msd-item input').forEach(cb => {
+        cb.addEventListener('change', () => updateMsdLabel(`${container.id}-dd`));
+    });
+
+    document.addEventListener('click', (e) => {
+        const dd = document.getElementById(`${container.id}-dd`);
+        if (dd && !dd.contains(e.target)) dd.classList.remove('open');
+    }, true);
+
+    updateMsdLabel(`${container.id}-dd`);
+}
+
+function getSelectedDropdownValues(container) {
+    if (!container) return [];
+    return Array.from(container.querySelectorAll('.msd-item input:checked')).map(cb => cb.value);
+}
+
+function setDropdownValues(container, checked) {
+    if (!container) return;
+    container.querySelectorAll('.msd-item input').forEach(cb => {
+        cb.checked = checked;
+    });
+    updateMsdLabel(`${container.id}-dd`);
+}
+
+function setServiceOptionsNote(message = '', isWarning = false) {
+    if (!elements.serviceOptionsNote) return;
+    if (!message) {
+        elements.serviceOptionsNote.style.display = 'none';
+        elements.serviceOptionsNote.textContent = '';
+        elements.serviceOptionsNote.style.color = 'var(--text-muted)';
+        return;
+    }
+
+    elements.serviceOptionsNote.style.display = 'block';
+    elements.serviceOptionsNote.textContent = message;
+    elements.serviceOptionsNote.style.color = isWarning ? 'var(--warning-color)' : 'var(--text-muted)';
+}
+
+function updateCheckboxAvailability(input, enabled) {
+    if (!input) return;
+    input.disabled = !enabled;
+    if (!enabled) input.checked = false;
+    const label = input.closest('label');
+    if (label) {
+        label.style.opacity = enabled ? '1' : '0.6';
+    }
+}
+
+function resetRegistrationServiceOptions() {
+    currentServiceOptions = null;
+    updateCheckboxAvailability(elements.randomEmailService, false);
+    elements.randomOutlookAccountGroup.style.display = 'none';
+    elements.randomDomainGroup.style.display = 'none';
+    if (elements.randomOutlookAccount) elements.randomOutlookAccount.checked = false;
+    if (elements.randomDomain) elements.randomDomain.checked = false;
+    if (elements.domainSelect) elements.domainSelect.innerHTML = '';
+    if (elements.emailAddressSelect) elements.emailAddressSelect.innerHTML = '';
+    if (elements.domainSelectGroup) elements.domainSelectGroup.style.display = 'none';
+    if (elements.emailAddressSelectGroup) elements.emailAddressSelectGroup.style.display = 'none';
+    if (elements.serviceOptionsSection) elements.serviceOptionsSection.style.display = 'none';
+    setServiceOptionsNote('');
+}
+
+async function loadRegistrationServiceOptions() {
+    const selectedValue = elements.emailService.value;
+    if (!selectedValue) {
+        resetRegistrationServiceOptions();
+        return;
+    }
+
+    const [type, id] = selectedValue.split(':');
+    if (type === 'outlook_batch') {
+        resetRegistrationServiceOptions();
+        return;
+    }
+
+    resetRegistrationServiceOptions();
+
+    try {
+        const params = new URLSearchParams({ service_type: type });
+        if (id && id !== 'default') {
+            params.set('service_id', id);
+        }
+
+        const data = await api.get(`/registration/service-options?${params.toString()}`);
+        currentServiceOptions = data;
+
+        updateCheckboxAvailability(elements.randomEmailService, !!data.supports_random_service);
+        elements.randomOutlookAccountGroup.style.display = data.supports_random_outlook_account ? 'flex' : 'none';
+        elements.randomDomainGroup.style.display = data.supports_random_domain ? 'flex' : 'none';
+
+        const domains = (data.domains || []).map(domain => ({
+            value: domain,
+            text: `@${domain}`,
+            checked: false,
+        }));
+        const emailAddresses = (data.email_addresses || []).map(item => ({
+            value: item.email,
+            text: item.is_registered ? `${item.email} (已注册)` : item.email,
+            checked: false,
+        }));
+
+        if (domains.length > 1) {
+            renderMultiSelect(elements.domainSelect, domains, '暂无可选域名');
+            elements.domainSelectGroup.style.display = 'block';
+        }
+
+        if (emailAddresses.length > 0) {
+            renderMultiSelect(elements.emailAddressSelect, emailAddresses, '暂无可选邮箱地址');
+            elements.emailAddressSelectGroup.style.display = 'block';
+        }
+
+        const notes = data.notes || [];
+        const defaultNote = emailAddresses.length > 0 || domains.length > 1
+            ? '如不勾选任何地址或域名，系统会继续沿用当前默认创建逻辑。'
+            : '';
+        setServiceOptionsNote(notes.length > 0 ? notes.join('；') : defaultNote, notes.length > 0);
+
+        const shouldShowSection = emailAddresses.length > 0 || domains.length > 1 || notes.length > 0;
+        elements.serviceOptionsSection.style.display = shouldShowSection ? 'block' : 'none';
+    } catch (error) {
+        setServiceOptionsNote(`读取邮箱地址或域名失败: ${error.message}`, true);
+        elements.serviceOptionsSection.style.display = 'block';
+    }
+}
+
 // 事件监听
 function initEventListeners() {
     // 注册表单提交
@@ -195,6 +366,21 @@ function initEventListeners() {
 
     // 邮箱服务切换
     elements.emailService.addEventListener('change', handleServiceChange);
+    if (elements.refreshServiceOptionsBtn) {
+        elements.refreshServiceOptionsBtn.addEventListener('click', loadRegistrationServiceOptions);
+    }
+    if (elements.domainSelectAllBtn) {
+        elements.domainSelectAllBtn.addEventListener('click', () => setDropdownValues(elements.domainSelect, true));
+    }
+    if (elements.domainSelectClearBtn) {
+        elements.domainSelectClearBtn.addEventListener('click', () => setDropdownValues(elements.domainSelect, false));
+    }
+    if (elements.emailAddressSelectAllBtn) {
+        elements.emailAddressSelectAllBtn.addEventListener('click', () => setDropdownValues(elements.emailAddressSelect, true));
+    }
+    if (elements.emailAddressSelectClearBtn) {
+        elements.emailAddressSelectClearBtn.addEventListener('click', () => setDropdownValues(elements.emailAddressSelect, false));
+    }
 
     // 取消按钮
     elements.cancelBtn.addEventListener('click', handleCancelTask);
@@ -228,6 +414,7 @@ async function loadAvailableServices() {
 
         // 更新邮箱服务选择框
         updateEmailServiceOptions();
+        await handleServiceChange({ target: elements.emailService });
 
         addLog('info', '[系统] 邮箱服务列表已加载');
     } catch (error) {
@@ -372,12 +559,32 @@ function updateEmailServiceOptions() {
 
         select.appendChild(optgroup);
     }
+
+    // IMAP 邮箱
+    if (availableServices.imap_mail && availableServices.imap_mail.available) {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = `📮 IMAP 邮箱 (${availableServices.imap_mail.count} 个服务)`;
+
+        availableServices.imap_mail.services.forEach(service => {
+            const option = document.createElement('option');
+            option.value = `imap_mail:${service.id}`;
+            option.textContent = service.name + (service.email ? ` (${service.email})` : '');
+            option.dataset.type = 'imap_mail';
+            option.dataset.serviceId = service.id;
+            optgroup.appendChild(option);
+        });
+
+        select.appendChild(optgroup);
+    }
 }
 
 // 处理邮箱服务切换
-function handleServiceChange(e) {
+async function handleServiceChange(e) {
     const value = e.target.value;
-    if (!value) return;
+    if (!value) {
+        resetRegistrationServiceOptions();
+        return;
+    }
 
     const [type, id] = value.split(':');
     // 处理 Outlook 批量注册模式
@@ -387,6 +594,10 @@ function handleServiceChange(e) {
         elements.regModeGroup.style.display = 'none';
         elements.batchCountGroup.style.display = 'none';
         elements.batchOptions.style.display = 'none';
+        if (elements.registrationSelectionGroup) {
+            elements.registrationSelectionGroup.style.display = 'none';
+        }
+        resetRegistrationServiceOptions();
         loadOutlookAccounts();
         addLog('info', '[系统] 已切换到 Outlook 批量注册模式');
         return;
@@ -394,6 +605,9 @@ function handleServiceChange(e) {
         isOutlookBatchMode = false;
         elements.outlookBatchSection.style.display = 'none';
         elements.regModeGroup.style.display = 'block';
+        if (elements.registrationSelectionGroup) {
+            elements.registrationSelectionGroup.style.display = 'block';
+        }
     }
 
     // 显示服务信息
@@ -422,7 +636,14 @@ function handleServiceChange(e) {
         if (service) {
             addLog('info', `[系统] 已选择 Freemail 服务: ${service.name}`);
         }
+    } else if (type === 'imap_mail') {
+        const service = availableServices.imap_mail.services.find(s => s.id == id);
+        if (service) {
+            addLog('info', `[系统] 已选择 IMAP 邮箱服务: ${service.name}`);
+        }
     }
+
+    await loadRegistrationServiceOptions();
 }
 
 // 模式切换
@@ -474,6 +695,11 @@ async function handleStartRegistration(e) {
     // 构建请求数据（代理从设置中自动获取）
     const requestData = {
         email_service_type: emailServiceType,
+        random_email_service: !!(elements.randomEmailService && elements.randomEmailService.checked && !elements.randomEmailService.disabled),
+        random_outlook_account: !!(elements.randomOutlookAccount && elements.randomOutlookAccount.checked),
+        random_domain: !!(elements.randomDomain && elements.randomDomain.checked),
+        selected_email_addresses: getSelectedDropdownValues(elements.emailAddressSelect),
+        selected_domains: getSelectedDropdownValues(elements.domainSelect),
         auto_upload_cpa: elements.autoUploadCpa ? elements.autoUploadCpa.checked : false,
         cpa_service_ids: elements.autoUploadCpa && elements.autoUploadCpa.checked ? getSelectedServiceIds(elements.cpaServiceSelect) : [],
         auto_upload_sub2api: elements.autoUploadSub2api ? elements.autoUploadSub2api.checked : false,

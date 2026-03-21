@@ -26,3 +26,11 @@ def test_index_template_uses_versioned_static_assets():
     assert '/static/css/style.css?v={{ static_version }}' in template
     assert '/static/js/utils.js?v={{ static_version }}' in template
     assert '/static/js/app.js?v={{ static_version }}' in template
+
+
+def test_team_template_uses_versioned_static_assets():
+    template = Path("templates/team.html").read_text(encoding="utf-8")
+
+    assert '/static/css/style.css?v={{ static_version }}' in template
+    assert '/static/js/utils.js?v={{ static_version }}' in template
+    assert '/static/js/team.js?v={{ static_version }}' in template

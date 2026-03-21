@@ -92,6 +92,12 @@ async def task_websocket(websocket: WebSocket, task_uuid: str):
         task_manager.unregister_websocket(task_uuid, websocket)
 
 
+@router.websocket("/ws/team/{task_uuid}")
+async def team_task_websocket(websocket: WebSocket, task_uuid: str):
+    """Team 任务 WebSocket 复用普通任务通道。"""
+    await task_websocket(websocket, task_uuid)
+
+
 @router.websocket("/ws/batch/{batch_id}")
 async def batch_websocket(websocket: WebSocket, batch_id: str):
     """

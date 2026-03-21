@@ -204,7 +204,11 @@ class BaseEmailService(abc.ABC):
                         continue
 
                     # 检查邮箱地址
-                    if email_data.get("address") != email:
+                    if isinstance(email_data, dict):
+                        email_address = email_data.get("address") or email_data.get("email")
+                    else:
+                        email_address = email_data
+                    if email_address != email:
                         continue
 
                     # 获取邮件列表
@@ -254,6 +258,15 @@ class BaseEmailService(abc.ABC):
             这是可选方法，某些服务可能不支持
         """
         raise NotImplementedError("此邮箱服务不支持获取邮件列表")
+
+    def list_domains(self) -> List[str]:
+        """
+        列出当前服务可用域名（可选实现）
+
+        Returns:
+            域名列表
+        """
+        return []
 
     def get_message_content(self, email_id: str, message_id: str) -> Optional[Dict[str, Any]]:
         """
