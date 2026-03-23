@@ -104,12 +104,16 @@ class DatabaseSessionManager:
         # 需要检查和添加的新列
         migrations = [
             # (表名, 列名, 列类型)
+            ("accounts", "remark", "TEXT"),
             ("accounts", "cpa_uploaded", "BOOLEAN DEFAULT 0"),
             ("accounts", "cpa_uploaded_at", "DATETIME"),
             ("accounts", "source", "VARCHAR(20) DEFAULT 'register'"),
             ("accounts", "subscription_type", "VARCHAR(20)"),
             ("accounts", "subscription_at", "DATETIME"),
             ("accounts", "cookies", "TEXT"),
+            ("sub2api_services", "template_config", "TEXT"),
+            ("sub2api_services", "next_name_index", "INTEGER DEFAULT 1"),
+            ("team_tasks", "continue_requested_at", "DATETIME"),
             ("proxies", "is_default", "BOOLEAN DEFAULT 0"),
         ]
 
@@ -124,6 +128,12 @@ class DatabaseSessionManager:
                 conn.commit()
             except Exception as e:
                 logger.warning(f"迁移 custom_domain -> moe_mail 时出错: {e}")
+
+            try:
+                conn.execute(text("UPDATE sub2api_services SET next_name_index = 1 WHERE next_name_index IS NULL"))
+                conn.commit()
+            except Exception as e:
+                logger.warning(f"初始化 sub2api_services.next_name_index 时出错: {e}")
 
             for table_name, column_name, column_type in migrations:
                 try:

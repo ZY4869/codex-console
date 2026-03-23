@@ -41,6 +41,7 @@ TEAM_SUPPORTED_SERVICE_TYPES = (
     EmailServiceType.TEMP_MAIL,
 )
 TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled"}
+TEAM_RETRY_BACKOFF_SECONDS = (2, 4, 6, 8, 10)
 
 
 class TeamCancelledError(RuntimeError):
@@ -49,6 +50,10 @@ class TeamCancelledError(RuntimeError):
 
 class TeamOrchestrationError(RuntimeError):
     """Team 编排失败。"""
+
+
+class TeamSubscriptionPendingError(RuntimeError):
+    """Team subscription is not ready yet."""
 
 
 def get_supported_team_service_values() -> List[str]:
@@ -171,7 +176,7 @@ def build_member_summary(member: TeamMember) -> Dict[str, Any]:
     }
 
 
-def build_team_response(task: TeamTask) -> Dict[str, Any]:
+def build_team_response(task: TeamTask, runtime_status: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     members = sorted(task.members or [], key=lambda item: item.order_index)
     stats = {
         "total_members": len(members),
@@ -182,6 +187,7 @@ def build_team_response(task: TeamTask) -> Dict[str, Any]:
         "failed_members": sum(1 for item in members if item.invitation_status == "failed"),
         "cancelled_members": sum(1 for item in members if item.invitation_status == "cancelled"),
     }
+    runtime_status = runtime_status or {}
 
     return {
         "id": task.id,
@@ -193,6 +199,7 @@ def build_team_response(task: TeamTask) -> Dict[str, Any]:
         "workspace_name": task.workspace_name,
         "team_account_id": task.team_account_id,
         "team_workspace_id": task.team_workspace_id,
+        "continue_requested": bool(task.continue_requested_at),
         "upload_config": task.upload_config or {},
         "logs": task.logs,
         "error_message": task.error_message,
@@ -203,6 +210,12 @@ def build_team_response(task: TeamTask) -> Dict[str, Any]:
         "main_account": build_account_summary(task.main_account) if task.main_account else None,
         "members": [build_member_summary(member) for member in members],
         "stats": stats,
+        "retrying": bool(runtime_status.get("retrying")),
+        "current_member_index": runtime_status.get("current_member_index"),
+        "current_member_attempt": runtime_status.get("current_member_attempt"),
+        "max_member_attempts": runtime_status.get("max_member_attempts"),
+        "next_retry_in_seconds": runtime_status.get("next_retry_in_seconds"),
+        "runtime_message": runtime_status.get("runtime_message"),
     }
 
 
@@ -636,6 +649,7 @@ class TeamOrchestrator:
                             api_url=service.api_url,
                             api_key=service.api_key,
                             team_context=team_context,
+                            service_id=service.id,
                         )
                     )
                 results["sub2api"] = self._collapse_platform_results(platform_results)
@@ -658,6 +672,7 @@ class TeamOrchestrator:
                             api_url=service.api_url,
                             api_token=service.api_token,
                             team_context=team_context,
+                            service_id=service.id,
                         )
                     )
                 results["cpa"] = self._collapse_platform_results(platform_results)
@@ -680,6 +695,7 @@ class TeamOrchestrator:
                             api_url=service.api_url,
                             api_key=service.api_key,
                             team_context=team_context,
+                            service_id=service.id,
                         )
                     )
                 results["tm"] = self._collapse_platform_results(platform_results)

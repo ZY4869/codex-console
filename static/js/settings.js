@@ -57,6 +57,9 @@ const elements = {
     sub2ApiServiceForm: document.getElementById('sub2api-service-form'),
     sub2ApiServiceModalTitle: document.getElementById('sub2api-service-modal-title'),
     testSub2ApiServiceBtn: document.getElementById('test-sub2api-service-btn'),
+    loadSub2ApiGroupsBtn: document.getElementById('load-sub2api-groups-btn'),
+    sub2ApiGroupList: document.getElementById('sub2api-group-list'),
+    sub2ApiGroupsStatus: document.getElementById('sub2api-groups-status'),
     // Team Manager 服务管理
     addTmServiceBtn: document.getElementById('add-tm-service-btn'),
     tmServicesTable: document.getElementById('tm-services-table'),
@@ -76,6 +79,8 @@ const elements = {
 
 // 选中的服务 ID
 let selectedServiceIds = new Set();
+let _sub2apiAvailableGroups = [];
+let _sub2apiSelectedGroupIds = new Set();
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
@@ -311,6 +316,9 @@ function initEventListeners() {
     }
     if (elements.testSub2ApiServiceBtn) {
         elements.testSub2ApiServiceBtn.addEventListener('click', handleTestSub2ApiService);
+    }
+    if (elements.loadSub2ApiGroupsBtn) {
+        elements.loadSub2ApiGroupsBtn.addEventListener('click', () => loadSub2ApiGroups());
     }
 }
 
@@ -1379,21 +1387,141 @@ async function handleTestCpaService() {
 
 let _sub2apiEditingId = null;
 
+function setSub2ApiGroupsStatus(text, isError = false) {
+    if (!elements.sub2ApiGroupsStatus) return;
+    elements.sub2ApiGroupsStatus.textContent = text;
+    elements.sub2ApiGroupsStatus.style.color = isError ? 'var(--danger-color)' : 'var(--text-muted)';
+}
+
+function getSelectedSub2ApiGroupIds() {
+    return Array.from(_sub2apiSelectedGroupIds).sort((a, b) => a - b);
+}
+
+function renderSub2ApiGroupOptions() {
+    if (!elements.sub2ApiGroupList) return;
+
+    if (!_sub2apiAvailableGroups.length) {
+        const presetCount = _sub2apiSelectedGroupIds.size;
+        elements.sub2ApiGroupList.innerHTML = `
+            <div style="color:var(--text-muted);padding:4px 2px;">
+                ${presetCount > 0 ? `已预设 ${presetCount} 个分组，点击“加载已有分组”校验` : '暂无分组，请先加载'}
+            </div>
+        `;
+        setSub2ApiGroupsStatus(presetCount > 0 ? `已预设 ${presetCount} 个分组，尚未从服务读取` : '未加载分组');
+        return;
+    }
+
+    elements.sub2ApiGroupList.innerHTML = _sub2apiAvailableGroups.map(group => {
+        const checked = _sub2apiSelectedGroupIds.has(Number(group.id)) ? 'checked' : '';
+        const activeCount = group.active_account_count ?? group.account_count ?? 0;
+        const subscriptionType = group.subscription_type || 'standard';
+        return `
+            <label style="display:flex;gap:10px;align-items:flex-start;padding:8px;border:1px solid var(--border);border-radius:8px;cursor:pointer;">
+                <input type="checkbox" class="sub2api-group-checkbox" value="${group.id}" ${checked} style="margin-top:2px;">
+                <div style="min-width:0;">
+                    <div style="font-weight:500;">${escapeHtml(group.name || `Group ${group.id}`)}</div>
+                    <div style="font-size:0.78rem;color:var(--text-muted);line-height:1.4;">
+                        ID ${group.id} · ${escapeHtml(group.platform || 'openai')} · ${escapeHtml(group.status || 'active')} · ${escapeHtml(subscriptionType)} · 账号 ${escapeHtml(String(activeCount))}
+                    </div>
+                </div>
+            </label>
+        `;
+    }).join('');
+
+    elements.sub2ApiGroupList.querySelectorAll('.sub2api-group-checkbox').forEach(checkbox => {
+        checkbox.addEventListener('change', (event) => {
+            const groupId = parseInt(event.target.value, 10);
+            if (!Number.isFinite(groupId)) return;
+            if (event.target.checked) {
+                _sub2apiSelectedGroupIds.add(groupId);
+            } else {
+                _sub2apiSelectedGroupIds.delete(groupId);
+            }
+            const selectedCount = _sub2apiSelectedGroupIds.size;
+            const totalCount = _sub2apiAvailableGroups.length;
+            setSub2ApiGroupsStatus(selectedCount > 0 ? `已选择 ${selectedCount} / ${totalCount} 个分组` : `已加载 ${totalCount} 个分组，未选择默认分组`);
+        });
+    });
+
+    const selectedCount = _sub2apiSelectedGroupIds.size;
+    const totalCount = _sub2apiAvailableGroups.length;
+    setSub2ApiGroupsStatus(selectedCount > 0 ? `已选择 ${selectedCount} / ${totalCount} 个分组` : `已加载 ${totalCount} 个分组，未选择默认分组`);
+}
+
+async function loadSub2ApiGroups(options = {}) {
+    const serviceIdValue = options.serviceId ?? document.getElementById('sub2api-service-id').value;
+    const serviceId = serviceIdValue ? parseInt(serviceIdValue, 10) : null;
+    const apiUrl = document.getElementById('sub2api-service-url').value.trim();
+    const apiKey = document.getElementById('sub2api-service-key').value.trim();
+
+    if (!serviceId && (!apiUrl || !apiKey)) {
+        if (!options.silent) {
+            toast.error('请先填写 API URL 和 API Key');
+        }
+        return;
+    }
+
+    if (elements.loadSub2ApiGroupsBtn) {
+        elements.loadSub2ApiGroupsBtn.disabled = true;
+        elements.loadSub2ApiGroupsBtn.textContent = '加载中...';
+    }
+    setSub2ApiGroupsStatus('正在加载分组...');
+
+    try {
+        const payload = {};
+        if (serviceId) payload.service_id = serviceId;
+        if (apiUrl) payload.api_url = apiUrl;
+        if (apiKey) payload.api_key = apiKey;
+
+        const groups = await api.post('/sub2api-services/fetch-groups', payload);
+        _sub2apiAvailableGroups = Array.isArray(groups) ? groups : [];
+
+        const availableIds = new Set(_sub2apiAvailableGroups.map(group => parseInt(group.id, 10)).filter(Number.isFinite));
+        _sub2apiSelectedGroupIds = new Set(
+            Array.from(_sub2apiSelectedGroupIds).filter(groupId => availableIds.has(groupId))
+        );
+
+        renderSub2ApiGroupOptions();
+        if (!options.silent) {
+            toast.success(`已加载 ${_sub2apiAvailableGroups.length} 个分组`);
+        }
+    } catch (e) {
+        _sub2apiAvailableGroups = [];
+        renderSub2ApiGroupOptions();
+        setSub2ApiGroupsStatus('加载分组失败', true);
+        if (!options.silent) {
+            toast.error('加载分组失败: ' + e.message);
+        }
+    } finally {
+        if (elements.loadSub2ApiGroupsBtn) {
+            elements.loadSub2ApiGroupsBtn.disabled = false;
+            elements.loadSub2ApiGroupsBtn.textContent = '加载已有分组';
+        }
+    }
+}
+
 async function loadSub2ApiServices() {
     try {
         const services = await api.get('/sub2api-services');
         renderSub2ApiServices(services);
     } catch (e) {
         if (elements.sub2ApiServicesTable) {
-            elements.sub2ApiServicesTable.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px;">加载失败</td></tr>';
+            elements.sub2ApiServicesTable.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px;">加载失败</td></tr>';
         }
     }
+}
+
+function formatSub2ApiFallbackName(service) {
+    const cfg = service.template_config || {};
+    const digits = Math.max(1, parseInt(cfg.name_digits, 10) || 9);
+    const nextIndex = Math.max(1, parseInt(service.next_name_index, 10) || 1);
+    return `GPT-Free-${String(nextIndex).padStart(digits, '0')}`;
 }
 
 function renderSub2ApiServices(services) {
     if (!elements.sub2ApiServicesTable) return;
     if (!services || services.length === 0) {
-        elements.sub2ApiServicesTable.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px;">暂无 Sub2API 服务，点击「添加服务」新增</td></tr>';
+        elements.sub2ApiServicesTable.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px;">暂无 Sub2API 服务，点击「添加服务」新增</td></tr>';
         return;
     }
     elements.sub2ApiServicesTable.innerHTML = services.map(s => `
@@ -1402,6 +1530,12 @@ function renderSub2ApiServices(services) {
             <td style="font-size:0.85rem;color:var(--text-muted);">${escapeHtml(s.api_url)}</td>
             <td style="text-align:center;" title="${s.enabled ? '已启用' : '已禁用'}">${s.enabled ? '✅' : '⭕'}</td>
             <td style="text-align:center;">${s.priority}</td>
+            <td>
+                <div style="font-family:var(--font-mono);font-size:0.82rem;">${escapeHtml(formatSub2ApiFallbackName(s))}</div>
+                <div style="font-size:0.75rem;color:var(--text-muted);">默认分组 ${escapeHtml(String((s.template_config?.default_group_ids || []).length))} 个</div>
+                <div style="font-size:0.75rem;color:var(--text-muted);">固定前缀 GPT-，按账号身份自动命名</div>
+                <div style="font-size:0.75rem;color:var(--text-muted);">默认并发 ${escapeHtml(String(s.template_config?.default_concurrency || 1))}</div>
+            </td>
             <td style="white-space:nowrap;">
                 <button class="btn btn-secondary btn-sm" onclick="editSub2ApiService(${s.id})">编辑</button>
                 <button class="btn btn-secondary btn-sm" onclick="testSub2ApiServiceById(${s.id})">测试</button>
@@ -1416,20 +1550,39 @@ function openSub2ApiServiceModal(svc = null) {
     elements.sub2ApiServiceModalTitle.textContent = svc ? '编辑 Sub2API 服务' : '添加 Sub2API 服务';
     elements.sub2ApiServiceForm.reset();
     document.getElementById('sub2api-service-id').value = svc ? svc.id : '';
+    const templateConfig = svc?.template_config || {};
+    _sub2apiSelectedGroupIds = new Set((templateConfig.default_group_ids || []).map(id => parseInt(id, 10)).filter(Number.isFinite));
+    _sub2apiAvailableGroups = [];
+    document.getElementById('sub2api-name-prefix').value = 'GPT-';
+    document.getElementById('sub2api-next-name-index').value = svc?.next_name_index || 1;
+    document.getElementById('sub2api-name-digits').value = templateConfig.name_digits || 9;
+    document.getElementById('sub2api-default-rate-multiplier').value = templateConfig.default_rate_multiplier || 1;
+    document.getElementById('sub2api-default-concurrency').value = templateConfig.default_concurrency || 1;
+    document.getElementById('sub2api-default-priority').value = templateConfig.default_priority || 50;
+    document.getElementById('sub2api-auto-pause-on-expired').checked = templateConfig.auto_pause_on_expired !== false;
+    renderSub2ApiGroupOptions();
     if (svc) {
         document.getElementById('sub2api-service-name').value = svc.name || '';
         document.getElementById('sub2api-service-url').value = svc.api_url || '';
         document.getElementById('sub2api-service-priority').value = svc.priority ?? 0;
         document.getElementById('sub2api-service-enabled').checked = svc.enabled !== false;
         document.getElementById('sub2api-service-key').placeholder = svc.has_key ? '已配置，留空保持不变' : '请输入 API Key';
+    } else {
+        document.getElementById('sub2api-service-key').placeholder = '请输入 API Key';
     }
     elements.sub2ApiServiceEditModal.classList.add('active');
+    if (svc?.id) {
+        loadSub2ApiGroups({ serviceId: svc.id, silent: true });
+    }
 }
 
 function closeSub2ApiServiceModal() {
     elements.sub2ApiServiceEditModal.classList.remove('active');
     elements.sub2ApiServiceForm.reset();
     _sub2apiEditingId = null;
+    _sub2apiAvailableGroups = [];
+    _sub2apiSelectedGroupIds = new Set();
+    renderSub2ApiGroupOptions();
 }
 
 async function editSub2ApiService(id) {
@@ -1459,6 +1612,16 @@ async function handleSaveSub2ApiService(e) {
         name: document.getElementById('sub2api-service-name').value,
         api_url: document.getElementById('sub2api-service-url').value,
         api_key: document.getElementById('sub2api-service-key').value || undefined,
+        template_config: {
+            name_prefix: 'GPT-',
+            name_digits: parseInt(document.getElementById('sub2api-name-digits').value, 10) || 9,
+            default_concurrency: parseInt(document.getElementById('sub2api-default-concurrency').value, 10) || 1,
+            default_priority: parseInt(document.getElementById('sub2api-default-priority').value, 10) || 50,
+            default_rate_multiplier: parseFloat(document.getElementById('sub2api-default-rate-multiplier').value) || 1,
+            auto_pause_on_expired: document.getElementById('sub2api-auto-pause-on-expired').checked,
+            default_group_ids: getSelectedSub2ApiGroupIds(),
+        },
+        next_name_index: parseInt(document.getElementById('sub2api-next-name-index').value, 10) || 1,
         priority: parseInt(document.getElementById('sub2api-service-priority').value) || 0,
         enabled: document.getElementById('sub2api-service-enabled').checked,
     };

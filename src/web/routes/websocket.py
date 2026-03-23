@@ -66,6 +66,18 @@ async def task_websocket(websocket: WebSocket, task_uuid: str):
                 # 处理取消请求
                 elif data.get("type") == "cancel":
                     task_manager.cancel_task(task_uuid)
+                    runtime_status = task_manager.get_status(task_uuid) or {}
+                    task_manager.update_status(
+                        task_uuid,
+                        "cancelling",
+                        attempt=runtime_status.get("attempt"),
+                        max_attempts=runtime_status.get("max_attempts"),
+                        retrying=False,
+                        last_error=runtime_status.get("last_error") or runtime_status.get("error"),
+                        next_retry_in_seconds=None,
+                        email=runtime_status.get("email"),
+                        email_service=runtime_status.get("email_service"),
+                    )
                     await websocket.send_json({
                         "type": "status",
                         "task_uuid": task_uuid,
@@ -95,6 +107,12 @@ async def task_websocket(websocket: WebSocket, task_uuid: str):
 @router.websocket("/ws/team/{task_uuid}")
 async def team_task_websocket(websocket: WebSocket, task_uuid: str):
     """Team 任务 WebSocket 复用普通任务通道。"""
+    await task_websocket(websocket, task_uuid)
+
+
+@router.websocket("/ws/team-invite/{task_uuid}")
+async def team_invite_task_websocket(websocket: WebSocket, task_uuid: str):
+    """Team invite task WebSocket reuses the generic task channel."""
     await task_websocket(websocket, task_uuid)
 
 

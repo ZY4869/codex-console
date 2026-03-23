@@ -42,6 +42,7 @@ class Account(Base):
     client_id = Column(String(255))  # OAuth Client ID
     account_id = Column(String(255))
     workspace_id = Column(String(255))
+    remark = Column(Text)
     email_service = Column(String(50), nullable=False)  # 'tempmail', 'outlook', 'moe_mail'
     email_service_id = Column(String(255))  # 邮箱服务中的ID
     proxy_used = Column(String(255))
@@ -65,6 +66,7 @@ class Account(Base):
             'id': self.id,
             'email': self.email,
             'password': self.password,
+            'remark': self.remark,
             'client_id': self.client_id,
             'email_service': self.email_service,
             'account_id': self.account_id,
@@ -152,6 +154,8 @@ class Sub2ApiService(Base):
     name = Column(String(100), nullable=False)  # 服务名称
     api_url = Column(String(500), nullable=False)  # API URL (host)
     api_key = Column(Text, nullable=False)  # x-api-key
+    template_config = Column(JSONEncodedDict)
+    next_name_index = Column(Integer, default=1)
     enabled = Column(Boolean, default=True)
     priority = Column(Integer, default=0)  # 优先级
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -229,4 +233,4 @@ class Proxy(Base):
         return f"{scheme}://{auth}{self.host}:{self.port}"
 
 
-from .team_models import TeamTask, TeamMember  # noqa: E402,F401
+from .team_models import TeamTask, TeamMember, TeamInviteTask, TeamInviteMember  # noqa: E402,F401

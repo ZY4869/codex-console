@@ -131,6 +131,58 @@ def test_resolve_registration_service_applies_selected_domain_and_email(monkeypa
     assert resolved.config["existing_email_id"] == "mail-2"
 
 
+def test_selected_domains_without_random_cycle_by_selection_index(monkeypatch):
+    manager = _build_db_manager("registration_domain_cycle.db")
+    with manager.session_scope() as session:
+        session.add(
+            EmailService(
+                service_type="freemail",
+                name="Freemail Cycle",
+                config={
+                    "base_url": "https://mail.example.test",
+                    "admin_token": "token",
+                    "domain": "alpha.test",
+                    "test_domains": ["alpha.test", "beta.test"],
+                },
+                enabled=True,
+                priority=0,
+            )
+        )
+
+    monkeypatch.setattr(
+        registration_selection.EmailServiceFactory,
+        "create",
+        lambda service_type, config, name=None: FakeSelectableService(config),
+    )
+
+    with manager.session_scope() as session:
+        first = registration_selection.resolve_email_service_for_registration(
+            db=session,
+            service_type=registration_selection.EmailServiceType.FREEMAIL,
+            requested_service_id=1,
+            fallback_config=None,
+            proxy_url=None,
+            selection=registration_selection.RegistrationSelectionRequest(
+                selected_domains=["beta.test", "alpha.test"],
+                selection_index=0,
+            ),
+        )
+        second = registration_selection.resolve_email_service_for_registration(
+            db=session,
+            service_type=registration_selection.EmailServiceType.FREEMAIL,
+            requested_service_id=1,
+            fallback_config=None,
+            proxy_url=None,
+            selection=registration_selection.RegistrationSelectionRequest(
+                selected_domains=["beta.test", "alpha.test"],
+                selection_index=1,
+            ),
+        )
+
+    assert first.config["domain"] == "beta.test"
+    assert second.config["domain"] == "alpha.test"
+
+
 def test_random_email_service_uses_random_choice(monkeypatch):
     manager = _build_db_manager("registration_random_service.db")
     with manager.session_scope() as session:

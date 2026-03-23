@@ -14,6 +14,11 @@ from curl_cffi import CurlMime
 from ...database.session import get_db
 from ...database.models import Account
 from ...config.settings import get_settings
+from .team_upload_guard import (
+    enrich_team_upload_error_detail,
+    evaluate_team_upload_guard,
+    record_team_upload_success,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +94,7 @@ def _post_cpa_auth_file_raw_json(upload_url: str, filename: str, file_content: b
     )
 
 
-def generate_token_json(account: Account) -> dict:
+def generate_token_json(account: Account, team_context: Optional[Dict[str, Any]] = None) -> dict:
     """
     生成 CPA 格式的 Token JSON
 
@@ -99,12 +104,13 @@ def generate_token_json(account: Account) -> dict:
     Returns:
         CPA 格式的 Token 字典
     """
+    team_account_id = str((team_context or {}).get("team_account_id") or "").strip()
     return {
         "type": "codex",
         "email": account.email,
         "expired": account.expires_at.strftime("%Y-%m-%dT%H:%M:%S+08:00") if account.expires_at else "",
         "id_token": account.id_token or "",
-        "account_id": account.account_id or "",
+        "account_id": team_account_id or account.account_id or "",
         "access_token": account.access_token or "",
         "last_refresh": account.last_refresh.strftime("%Y-%m-%dT%H:%M:%S+08:00") if account.last_refresh else "",
         "refresh_token": account.refresh_token or "",
@@ -189,6 +195,7 @@ def batch_upload_to_cpa(
     api_url: str = None,
     api_token: str = None,
     team_context: Optional[Dict[str, Any]] = None,
+    service_id: Optional[int] = None,
 ) -> dict:
     """
     批量上传账号到 CPA 管理平台
@@ -211,6 +218,7 @@ def batch_upload_to_cpa(
     }
 
     with get_db() as db:
+        uploadable_accounts: List[Account] = []
         for account_id in account_ids:
             account = db.query(Account).filter(Account.id == account_id).first()
 
@@ -235,8 +243,23 @@ def batch_upload_to_cpa(
                 })
                 continue
 
+            uploadable_accounts.append(account)
+
+        guard_result = evaluate_team_upload_guard(
+            db,
+            uploadable_accounts,
+            platform="cpa",
+            team_context=team_context,
+            service_id=service_id,
+        )
+        blocked_details = list(guard_result.get("blocked_details") or [])
+        if blocked_details:
+            results["skipped_count"] += len(blocked_details)
+            results["details"].extend(blocked_details)
+
+        for account in guard_result.get("allowed_accounts") or []:
             # 生成 Token JSON
-            token_data = generate_token_json(account)
+            token_data = generate_token_json(account, team_context=team_context)
 
             # 上传
             success, message = upload_to_cpa(
@@ -252,22 +275,31 @@ def batch_upload_to_cpa(
                 account.cpa_uploaded = True
                 account.cpa_uploaded_at = datetime.utcnow()
                 db.commit()
+                record_team_upload_success(
+                    db,
+                    account,
+                    platform="cpa",
+                    team_context=team_context,
+                    service_id=service_id,
+                )
 
                 results["success_count"] += 1
                 results["details"].append({
-                    "id": account_id,
+                    "id": account.id,
                     "email": account.email,
                     "success": True,
                     "message": message
                 })
             else:
                 results["failed_count"] += 1
-                results["details"].append({
-                    "id": account_id,
+                detail = {
+                    "id": account.id,
                     "email": account.email,
                     "success": False,
                     "error": message
-                })
+                }
+                enrich_team_upload_error_detail(detail, message)
+                results["details"].append(detail)
 
     return results
 

@@ -20,6 +20,7 @@
                 <a href="/email-services" class="nav-link">邮箱服务</a>
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/team" class="nav-link">Team 创建</a>
+                <a href="/team/invite" class="nav-link">Team 邀请</a>
                 <a href="/settings" class="nav-link active">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
             </div>
@@ -245,11 +246,12 @@
                                         <th>API URL</th>
                                         <th style="width:80px;">状态</th>
                                         <th style="width:60px;text-align:center;">优先级</th>
+                                        <th style="width:160px;">回退名称</th>
                                         <th style="width:220px;">操作</th>
                                     </tr>
                                 </thead>
                                 <tbody id="sub2api-services-table">
-                                    <tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px;">加载中...</td></tr>
+                                    <tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px;">加载中...</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -330,7 +332,7 @@
 
             <!-- Sub2API 服务编辑模态框 -->
             <div class="modal" id="sub2api-service-edit-modal">
-                <div class="modal-content" style="max-width: 500px;">
+                <div class="modal-content" style="max-width: 560px;">
                     <div class="modal-header">
                         <h3 id="sub2api-service-modal-title">添加 Sub2API 服务</h3>
                         <button class="modal-close" id="close-sub2api-service-modal">&times;</button>
@@ -349,6 +351,54 @@
                             <div class="form-group">
                                 <label for="sub2api-service-key">API Key</label>
                                 <input type="password" id="sub2api-service-key" placeholder="编辑时留空则保持原值" autocomplete="new-password">
+                            </div>
+                            <div class="form-group">
+                                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;">
+                                    <label style="margin-bottom:0;">默认分组</label>
+                                    <button type="button" class="btn btn-secondary btn-sm" id="load-sub2api-groups-btn">加载已有分组</button>
+                                </div>
+                                <p class="hint">程序直传成功后会自动绑定到这些已有分组；导出文件不包含分组绑定。</p>
+                                <div id="sub2api-groups-status" class="hint" style="margin:8px 0;">未加载分组</div>
+                                <div id="sub2api-group-list" style="max-height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:6px;">
+                                    <div style="color:var(--text-muted);padding:4px 2px;">暂无分组，请先加载</div>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="sub2api-name-prefix">名称前缀（固定）</label>
+                                    <input type="text" id="sub2api-name-prefix" value="GPT-" readonly>
+                                    <p class="hint">真实命名固定为 GPT-Identity-序号，例如 GPT-Free-000000001；多身份分组会按账号真实身份命名。</p>
+                                </div>
+                                <div class="form-group">
+                                    <label for="sub2api-next-name-index">回退起点 / 下一序号</label>
+                                    <input type="number" id="sub2api-next-name-index" value="1" min="1">
+                                    <p class="hint">恰好 1 个默认分组时会优先按分组现有账号智能补号；此值仅在无默认分组、多默认分组或远端读取失败时作为回退起点。</p>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="sub2api-name-digits">序号位数</label>
+                                    <input type="number" id="sub2api-name-digits" value="9" min="1" max="16">
+                                </div>
+                                <div class="form-group">
+                                    <label for="sub2api-default-rate-multiplier">默认倍率</label>
+                                    <input type="number" id="sub2api-default-rate-multiplier" value="1" min="0.1" step="0.1">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="sub2api-default-concurrency">默认并发</label>
+                                    <input type="number" id="sub2api-default-concurrency" value="1" min="1" max="100">
+                                </div>
+                                <div class="form-group">
+                                    <label for="sub2api-default-priority">默认优先级</label>
+                                    <input type="number" id="sub2api-default-priority" value="50" min="0" max="999999">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label style="display:flex;align-items:center;gap:8px;">
+                                    <input type="checkbox" id="sub2api-auto-pause-on-expired" checked> Token 过期后自动暂停
+                                </label>
                             </div>
                             <div class="form-row">
                                 <div class="form-group">

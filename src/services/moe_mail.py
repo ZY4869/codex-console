@@ -484,7 +484,7 @@ class MeoMailEmailService(BaseEmailService):
             self.update_status(False, e)
             return False
 
-    def get_email_messages(self, email_id: str, cursor: str = None) -> List[Dict[str, Any]]:
+    def get_email_messages(self, email_id: str, cursor: str = None, **kwargs) -> List[Dict[str, Any]]:
         """
         获取邮箱中的邮件列表
 
@@ -498,6 +498,7 @@ class MeoMailEmailService(BaseEmailService):
         params = {}
         if cursor:
             params["cursor"] = cursor
+        limit = kwargs.get("limit")
 
         try:
             response = self._make_request("GET", f"/api/emails/{email_id}", params=params)
@@ -512,6 +513,8 @@ class MeoMailEmailService(BaseEmailService):
                     "received_at": message.get("created_at") or message.get("createdAt"),
                     "raw_data": message,
                 })
+            if isinstance(limit, int) and limit > 0:
+                messages = messages[:limit]
             self.update_status(True)
             return messages
         except Exception as e:

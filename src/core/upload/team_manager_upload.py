@@ -4,12 +4,17 @@ Team Manager 上传功能
 """
 
 import logging
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from curl_cffi import requests as cffi_requests
 
 from ...database.models import Account
 from ...database.session import get_db
+from .team_upload_guard import (
+    enrich_team_upload_error_detail,
+    evaluate_team_upload_guard,
+    record_team_upload_success,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,7 @@ def upload_to_team_manager(
         "X-API-Key": api_key,
         "Content-Type": "application/json",
     }
+    team_account_id = str((team_context or {}).get("team_account_id") or "").strip()
     payload = {
         "import_type": "single",
         "email": account.email,
@@ -45,7 +51,7 @@ def upload_to_team_manager(
         "session_token": account.session_token or "",
         "refresh_token": account.refresh_token or "",
         "client_id": account.client_id or "",
-        "account_id": account.account_id or "",
+        "account_id": team_account_id or account.account_id or "",
     }
     if team_context:
         logger.info("Team Manager 单账号上传携带 Team 上下文: %s", team_context.get("team_task_uuid"))
@@ -78,6 +84,7 @@ def batch_upload_to_team_manager(
     api_url: str,
     api_key: str,
     team_context: dict = None,
+    service_id: Optional[int] = None,
 ) -> dict:
     """
     批量上传账号到 Team Manager（使用 batch 模式，一次请求提交所有账号）
@@ -94,7 +101,6 @@ def batch_upload_to_team_manager(
     }
 
     with get_db() as db:
-        lines = []
         valid_accounts = []
         for account_id in account_ids:
             account = db.query(Account).filter(Account.id == account_id).first()
@@ -110,18 +116,34 @@ def batch_upload_to_team_manager(
                     {"id": account_id, "email": account.email, "success": False, "error": "缺少 Token"}
                 )
                 continue
-            # 格式：邮箱,AT,RT,ST,ClientID
-            lines.append(",".join([
+            valid_accounts.append(account)
+
+        guard_result = evaluate_team_upload_guard(
+            db,
+            valid_accounts,
+            platform="tm",
+            team_context=team_context,
+            service_id=service_id,
+        )
+        blocked_details = list(guard_result.get("blocked_details") or [])
+        if blocked_details:
+            results["skipped_count"] += len(blocked_details)
+            results["details"].extend(blocked_details)
+
+        valid_accounts = list(guard_result.get("allowed_accounts") or [])
+        if not valid_accounts:
+            return results
+
+        lines = [
+            ",".join([
                 account.email or "",
                 account.access_token or "",
                 account.refresh_token or "",
                 account.session_token or "",
                 account.client_id or "",
-            ]))
-            valid_accounts.append(account)
-
-        if not valid_accounts:
-            return results
+            ])
+            for account in valid_accounts
+        ]
 
         url = api_url.rstrip("/") + "/admin/teams/import"
         headers = {
@@ -146,6 +168,13 @@ def batch_upload_to_team_manager(
             )
             if resp.status_code in (200, 201):
                 for account in valid_accounts:
+                    record_team_upload_success(
+                        db,
+                        account,
+                        platform="tm",
+                        team_context=team_context,
+                        service_id=service_id,
+                    )
                     results["success_count"] += 1
                     results["details"].append(
                         {"id": account.id, "email": account.email, "success": True, "message": "批量上传成功"}
@@ -160,17 +189,17 @@ def batch_upload_to_team_manager(
                     error_msg = f"{error_msg} - {resp.text[:200]}"
                 for account in valid_accounts:
                     results["failed_count"] += 1
-                    results["details"].append(
-                        {"id": account.id, "email": account.email, "success": False, "error": error_msg}
-                    )
+                    detail = {"id": account.id, "email": account.email, "success": False, "error": error_msg}
+                    enrich_team_upload_error_detail(detail, error_msg)
+                    results["details"].append(detail)
         except Exception as e:
             logger.error(f"Team Manager 批量上传异常: {e}")
             error_msg = f"上传异常: {str(e)}"
             for account in valid_accounts:
                 results["failed_count"] += 1
-                results["details"].append(
-                    {"id": account.id, "email": account.email, "success": False, "error": error_msg}
-                )
+                detail = {"id": account.id, "email": account.email, "success": False, "error": error_msg}
+                enrich_team_upload_error_detail(detail, error_msg)
+                results["details"].append(detail)
 
     return results
 

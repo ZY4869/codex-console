@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "Bash(curl -s http://localhost:8000/api/team-invite/4f5d5537-c34e-4ca2-a378-541750d31423)",
+      "Bash(curl -s -X POST http://localhost:8000/api/team-invite/4f5d5537-c34e-4ca2-a378-541750d31423/members/93/refresh-team)",
+      "Bash(curl -s -X POST http://localhost:8000/api/team-invite/4f5d5537-c34e-4ca2-a378-541750d31423/members/93/upload)",
+      "Bash(for mid:*)",
+      "Bash(do echo:*)",
+      "Bash(curl -s -X POST http://localhost:8000/api/team-invite/4f5d5537-c34e-4ca2-a378-541750d31423/members/$mid/refresh-team)",
+      "Bash(done)",
+      "Bash(curl -s -X POST http://localhost:8000/api/team-invite/4f5d5537-c34e-4ca2-a378-541750d31423/members/$mid/upload)"
+    ]
+  }
+}

@@ -166,6 +166,15 @@ def _response_with_login_cookies(workspace_id="ws-1", session_token="session-1")
     return DummyResponse(status_code=200, payload={}, on_return=setter)
 
 
+def _response_with_chunked_login_cookies(workspace_id="ws-1", chunk_a="chunk-a", chunk_b="chunk-b"):
+    def setter(session):
+        session.cookies["oai-client-auth-session"] = _workspace_cookie(workspace_id)
+        session.cookies["__Secure-authjs.session-token.0"] = chunk_a
+        session.cookies["__Secure-authjs.session-token.1"] = chunk_b
+
+    return DummyResponse(status_code=200, payload={}, on_return=setter)
+
+
 def test_check_sentinel_sends_non_empty_pow(monkeypatch):
     session = QueueSession([
         ("POST", OPENAI_API_ENDPOINTS["sentinel"], DummyResponse(payload={"token": "sentinel-token"})),
@@ -255,6 +264,60 @@ def test_run_registers_then_relogs_to_fetch_token():
     assert result.metadata["token_acquired_via_relogin"] is True
 
 
+def test_run_reassembles_chunked_session_cookie():
+    session_one = QueueSession([
+        ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["signup"],
+            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]}}),
+        ),
+        ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
+        ("GET", OPENAI_API_ENDPOINTS["send_otp"], DummyResponse(payload={})),
+        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], DummyResponse(payload={})),
+        ("POST", OPENAI_API_ENDPOINTS["create_account"], DummyResponse(payload={})),
+    ])
+    session_two = QueueSession([
+        ("GET", "https://auth.example.test/flow/2", _response_with_did("did-2")),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["signup"],
+            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["LOGIN_PASSWORD"]}}),
+        ),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["password_verify"],
+            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]}}),
+        ),
+        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], _response_with_chunked_login_cookies()),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["select_workspace"],
+            DummyResponse(payload={"continue_url": "https://auth.example.test/continue"}),
+        ),
+        (
+            "GET",
+            "https://auth.example.test/continue",
+            DummyResponse(
+                status_code=302,
+                headers={"Location": "http://localhost:1455/auth/callback?code=code-2&state=state-2"},
+            ),
+        ),
+    ])
+
+    email_service = FakeEmailService(["123456", "654321"])
+    engine = RegistrationEngine(email_service)
+    engine.http_client = FakeOpenAIClient([session_one, session_two], ["sentinel-1", "sentinel-2"])
+    engine.oauth_manager = FakeOAuthManager()
+
+    result = engine.run()
+
+    assert result.success is True
+    assert result.session_token == "chunk-achunk-b"
+    assert "__Secure-authjs.session-token.0=chunk-a" in result.cookies
+    assert "__Secure-authjs.session-token.1=chunk-b" in result.cookies
+
+
 def test_existing_account_login_uses_auto_sent_otp_without_manual_send():
     session = QueueSession([
         ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
@@ -294,3 +357,47 @@ def test_existing_account_login_uses_auto_sent_otp_without_manual_send():
     assert len(email_service.otp_requests) == 1
     assert email_service.otp_requests[0]["otp_sent_at"] is not None
     assert result.metadata["token_acquired_via_relogin"] is False
+
+
+def test_submit_signup_retries_when_auth_step_is_invalid():
+    stale_session = QueueSession([
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["signup"],
+            DummyResponse(
+                status_code=400,
+                payload={
+                    "error": {
+                        "message": "Invalid authorization step.",
+                        "code": "invalid_auth_step",
+                    }
+                },
+                text='{"error":{"message":"Invalid authorization step.","code":"invalid_auth_step"}}',
+            ),
+        ),
+    ])
+    fresh_session = QueueSession([
+        ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["signup"],
+            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]}}),
+        ),
+    ])
+
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+    fake_oauth = FakeOAuthManager()
+    engine.http_client = FakeOpenAIClient([stale_session, fresh_session], ["sentinel-1"])
+    engine.oauth_manager = fake_oauth
+    engine.email = "tester@example.com"
+    engine.session = stale_session
+
+    result = engine._submit_signup_form("stale-did", "stale-sentinel")
+
+    assert result.success is True
+    assert result.page_type == OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]
+    assert fake_oauth.start_calls == 1
+    retry_body = json.loads(fresh_session.calls[1]["kwargs"]["data"])
+    assert retry_body["screen_hint"] == "signup"
+    assert retry_body["username"]["value"] == "tester@example.com"

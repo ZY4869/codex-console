@@ -590,6 +590,17 @@ async function viewAccount(id) {
                     <span class="value">${format.date(account.last_refresh) || '-'}</span>
                 </div>
                 <div class="info-item" style="grid-column: span 2;">
+                    <span class="label">备注</span>
+                    <div class="value">
+                        <textarea id="remark-input-${id}" rows="2"
+                            style="width:100%;font-size:0.8rem;background:var(--surface-hover);border:1px solid var(--border);border-radius:4px;padding:6px;color:var(--text-primary);resize:vertical;"
+                            placeholder="用于 Sub2API notes，留空时自动回退邮箱">${escapeHtml(account.remark || '')}</textarea>
+                        <button class="btn btn-secondary btn-sm" style="margin-top:4px" onclick="saveRemark(${id})">
+                            保存备注
+                        </button>
+                    </div>
+                </div>
+                <div class="info-item" style="grid-column: span 2;">
                     <span class="label">Account ID</span>
                     <span class="value" style="font-size: 0.75rem; word-break: break-all;">
                         ${escapeHtml(account.account_id || '-')}
@@ -632,6 +643,31 @@ async function viewAccount(id) {
                         </button>
                     </div>
                 </div>
+                <div class="info-item" style="grid-column: span 2;">
+                    <span class="label">敏感信息 JSON</span>
+                    <div class="value">
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                            <button class="btn btn-secondary btn-sm" onclick="loadAccountSessionPayload(${id}, true)">
+                                重新生成
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="refreshAndPersistAccountSessionPayload(${id})">
+                                刷新并保存
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="copyAccountSessionPayload(${id})">
+                                复制 JSON
+                            </button>
+                        </div>
+                        <div id="session-payload-meta-${id}" style="font-size:0.8rem;color:var(--text-muted);margin-bottom:8px;">
+                            ${account.sensitive_session_payload_updated_at
+                                ? `最近保存：${escapeHtml(format.date(account.sensitive_session_payload_updated_at) || account.sensitive_session_payload_updated_at)}`
+                                : '尚未保存敏感信息 JSON 快照'}
+                        </div>
+                        <div style="font-size:0.8rem;color:var(--danger-color);margin-bottom:8px;">
+                            仅用于你自己安全保存和导入，请勿分享给任何人。
+                        </div>
+                        <pre id="session-payload-output-${id}" style="margin:0;max-height:260px;overflow:auto;font-size:0.72rem;line-height:1.55;font-family:var(--font-mono);background:var(--surface-hover);border:1px solid var(--border);border-radius:4px;padding:8px;white-space:pre-wrap;word-break:break-word;">加载中...</pre>
+                    </div>
+                </div>
             </div>
             <div style="margin-top: var(--spacing-lg); display: flex; gap: var(--spacing-sm);">
                 <button class="btn btn-primary" onclick="refreshToken(${id}); elements.detailModal.classList.remove('active');">
@@ -641,8 +677,70 @@ async function viewAccount(id) {
         `;
 
         elements.detailModal.classList.add('active');
+        loadAccountSessionPayload(id);
     } catch (error) {
         toast.error('加载账号详情失败: ' + error.message);
+    }
+}
+
+async function loadAccountSessionPayload(id, silent = false) {
+    const target = document.getElementById(`session-payload-output-${id}`);
+    if (!target) return null;
+
+    target.textContent = '加载中...';
+    try {
+        const payload = await api.get(`/accounts/${id}/session-payload`);
+        const content = JSON.stringify(payload, null, 2);
+        target.textContent = content;
+        target.dataset.loaded = 'true';
+        return content;
+    } catch (error) {
+        target.textContent = '生成失败：' + error.message;
+        target.dataset.loaded = 'false';
+        if (!silent) {
+            toast.error('生成敏感信息 JSON 失败: ' + error.message);
+        }
+        return null;
+    }
+}
+
+async function copyAccountSessionPayload(id) {
+    const target = document.getElementById(`session-payload-output-${id}`);
+    let content = target ? target.textContent : '';
+    if (!target || target.dataset.loaded !== 'true') {
+        content = await loadAccountSessionPayload(id);
+    }
+    if (!content) return;
+    copyToClipboard(content);
+}
+
+async function refreshAndPersistAccountSessionPayload(id) {
+    const target = document.getElementById(`session-payload-output-${id}`);
+    const meta = document.getElementById(`session-payload-meta-${id}`);
+    if (target) {
+        target.textContent = '生成并保存中...';
+    }
+
+    try {
+        const response = await api.post(`/accounts/${id}/session-payload/refresh`, {});
+        const payload = response.payload || {};
+        const content = JSON.stringify(payload, null, 2);
+        if (target) {
+            target.textContent = content;
+            target.dataset.loaded = 'true';
+        }
+        if (meta) {
+            meta.textContent = response.updated_at
+                ? `最近保存：${format.date(response.updated_at) || response.updated_at}`
+                : '敏感信息 JSON 已保存';
+        }
+        toast.success('敏感信息 JSON 已刷新并保存');
+    } catch (error) {
+        if (target) {
+            target.textContent = '生成失败：' + error.message;
+            target.dataset.loaded = 'false';
+        }
+        toast.error('刷新并保存敏感信息 JSON 失败: ' + error.message);
     }
 }
 
@@ -695,6 +793,13 @@ async function exportAccounts(format) {
         return;
     }
 
+    const extraPayload = {};
+    if (format === 'sub2api') {
+        const choice = await selectSub2ApiService();
+        if (choice === null) return;
+        if (choice.service_id != null) extraPayload.service_id = choice.service_id;
+    }
+
     toast.info(`正在导出 ${count} 个账号...`);
 
     try {
@@ -703,7 +808,7 @@ async function exportAccounts(format) {
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify(buildBatchPayload())
+            body: JSON.stringify(buildBatchPayload(extraPayload))
         });
 
         if (!response.ok) {
@@ -1216,6 +1321,20 @@ async function saveCookies(id) {
         toast.success('Cookies 已保存');
     } catch (e) {
         toast.error('保存 Cookies 失败: ' + e.message);
+    }
+}
+
+// 保存账号备注
+async function saveRemark(id) {
+    const textarea = document.getElementById(`remark-input-${id}`);
+    if (!textarea) return;
+    const remarkValue = textarea.value.trim();
+    try {
+        await api.patch(`/accounts/${id}`, { remark: remarkValue });
+        toast.success('备注已保存');
+        loadAccounts();
+    } catch (e) {
+        toast.error('保存备注失败: ' + e.message);
     }
 }
 

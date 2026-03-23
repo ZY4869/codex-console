@@ -6,8 +6,9 @@ import asyncio
 import logging
 import uuid
 import random
+import time
 from datetime import datetime
-from typing import List, Optional, Dict, Tuple
+from typing import Any, List, Optional, Dict, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
 from pydantic import BaseModel, Field
@@ -28,6 +29,8 @@ from .registration_selection import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+RETRY_BACKOFF_SECONDS = (2, 4, 6, 8, 10)
 
 # 任务存储（简单的内存存储，生产环境应使用 Redis）
 running_tasks: dict = {}
@@ -124,6 +127,13 @@ class RegistrationTaskResponse(BaseModel):
     logs: Optional[str] = None
     result: Optional[dict] = None
     error_message: Optional[str] = None
+    attempt: Optional[int] = None
+    max_attempts: Optional[int] = None
+    retrying: Optional[bool] = None
+    last_error: Optional[str] = None
+    next_retry_in_seconds: Optional[int] = None
+    email: Optional[str] = None
+    email_service: Optional[str] = None
     created_at: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
@@ -195,15 +205,28 @@ class OutlookBatchRegistrationResponse(BaseModel):
 
 def task_to_response(task: RegistrationTask) -> RegistrationTaskResponse:
     """转换任务模型为响应"""
+    runtime_status = task_manager.get_status(task.task_uuid) or {}
+    error_message = (
+        runtime_status.get("last_error")
+        or runtime_status.get("error")
+        or task.error_message
+    )
     return RegistrationTaskResponse(
         id=task.id,
         task_uuid=task.task_uuid,
-        status=task.status,
+        status=runtime_status.get("status", task.status),
         email_service_id=task.email_service_id,
         proxy=task.proxy,
         logs=task.logs,
         result=task.result,
-        error_message=task.error_message,
+        error_message=error_message,
+        attempt=runtime_status.get("attempt"),
+        max_attempts=runtime_status.get("max_attempts"),
+        retrying=runtime_status.get("retrying"),
+        last_error=runtime_status.get("last_error") or runtime_status.get("error"),
+        next_retry_in_seconds=runtime_status.get("next_retry_in_seconds"),
+        email=runtime_status.get("email"),
+        email_service=runtime_status.get("email_service"),
         created_at=task.created_at.isoformat() if task.created_at else None,
         started_at=task.started_at.isoformat() if task.started_at else None,
         completed_at=task.completed_at.isoformat() if task.completed_at else None,
@@ -217,6 +240,246 @@ def _normalize_email_service_config(
 ) -> dict:
     """按服务类型兼容旧字段名，避免不同服务的配置键互相污染。"""
     return normalize_email_service_config(service_type, config, proxy_url)
+
+
+def _get_max_registration_attempts() -> int:
+    """获取单个注册任务的最大尝试次数（首次执行 + 额外重试次数）。"""
+    retries = max(0, get_settings().registration_max_retries)
+    return retries + 1
+
+
+def _get_retry_wait_seconds(attempt: int) -> int:
+    """获取下一次重试前的等待秒数。"""
+    index = min(max(attempt - 1, 0), len(RETRY_BACKOFF_SECONDS) - 1)
+    return RETRY_BACKOFF_SECONDS[index]
+
+
+def _combine_task_logs(task_uuid: str, persisted_logs: Optional[str]) -> List[str]:
+    """合并数据库与内存中的任务日志，避免轮询时漏掉实时日志。"""
+    merged_logs: List[str] = []
+    seen_logs = set()
+
+    sources = []
+    if persisted_logs:
+        sources.append(persisted_logs.split("\n"))
+    sources.append(task_manager.get_logs(task_uuid))
+
+    for log_list in sources:
+        for log in log_list:
+            if not log or log in seen_logs:
+                continue
+            seen_logs.add(log)
+            merged_logs.append(log)
+
+    return merged_logs
+
+
+def _mark_task_cancelled(
+    db,
+    task_uuid: str,
+    attempt: int,
+    max_attempts: int,
+    error_message: Optional[str] = None,
+    email: Optional[str] = None,
+    email_service: Optional[str] = None,
+):
+    """将任务标记为已取消，并同步数据库与内存状态。"""
+    update_kwargs: Dict[str, Any] = {
+        "status": "cancelled",
+        "completed_at": datetime.utcnow(),
+    }
+    if error_message:
+        update_kwargs["error_message"] = error_message
+
+    crud.update_registration_task(db, task_uuid, **update_kwargs)
+    task_manager.update_status(
+        task_uuid,
+        "cancelled",
+        attempt=attempt,
+        max_attempts=max_attempts,
+        retrying=False,
+        last_error=error_message,
+        error=error_message,
+        next_retry_in_seconds=None,
+        email=email,
+        email_service=email_service,
+    )
+
+
+def _wait_for_retry_or_cancel(task_uuid: str, wait_seconds: int) -> bool:
+    """等待下次重试，期间允许用户取消任务。"""
+    deadline = time.monotonic() + max(0, wait_seconds)
+
+    while time.monotonic() < deadline:
+        if task_manager.is_cancelled(task_uuid):
+            return False
+        remaining = deadline - time.monotonic()
+        time.sleep(min(0.5, max(remaining, 0)))
+
+    return not task_manager.is_cancelled(task_uuid)
+
+
+def _perform_registration_uploads(
+    db,
+    account_email: str,
+    log_callback,
+    auto_upload_cpa: bool = False,
+    cpa_service_ids: Optional[List[int]] = None,
+    auto_upload_sub2api: bool = False,
+    sub2api_service_ids: Optional[List[int]] = None,
+    auto_upload_tm: bool = False,
+    tm_service_ids: Optional[List[int]] = None,
+):
+    """执行注册后的自动上传流程，上传失败仅记录日志，不影响注册成功。"""
+    saved_account = crud.get_account_by_email(db, account_email)
+    if not saved_account:
+        log_callback("[系统] 账号已注册，但数据库中未找到保存记录，跳过自动上传")
+        return
+
+    if auto_upload_cpa and saved_account.access_token:
+        try:
+            from ...core.upload.cpa_upload import upload_to_cpa, generate_token_json
+
+            token_data = generate_token_json(saved_account)
+            service_ids = cpa_service_ids or [s.id for s in crud.get_cpa_services(db, enabled=True)]
+            if not service_ids:
+                log_callback("[CPA] 无可用 CPA 服务，跳过上传")
+
+            for service_id in service_ids:
+                try:
+                    service = crud.get_cpa_service_by_id(db, service_id)
+                    if not service:
+                        continue
+                    log_callback(f"[CPA] 正在把账号打包发往服务站: {service.name}")
+                    ok, message = upload_to_cpa(token_data, api_url=service.api_url, api_token=service.api_token)
+                    if ok:
+                        saved_account.cpa_uploaded = True
+                        saved_account.cpa_uploaded_at = datetime.utcnow()
+                        db.commit()
+                        log_callback(f"[CPA] 投递成功，服务站已签收: {service.name}")
+                    else:
+                        log_callback(f"[CPA] 上传失败({service.name}): {message}")
+                except Exception as exc:
+                    log_callback(f"[CPA] 异常({service_id}): {exc}")
+        except Exception as exc:
+            log_callback(f"[CPA] 上传异常: {exc}")
+
+    if auto_upload_sub2api and saved_account.access_token:
+        try:
+            from ...core.upload.sub2api_upload import upload_to_sub2api
+
+            service_ids = sub2api_service_ids or [s.id for s in crud.get_sub2api_services(db, enabled=True)]
+            if not service_ids:
+                log_callback("[Sub2API] 无可用 Sub2API 服务，跳过上传")
+
+            for service_id in service_ids:
+                try:
+                    service = crud.get_sub2api_service_by_id(db, service_id)
+                    if not service:
+                        continue
+                    log_callback(f"[Sub2API] 正在把账号发往服务站: {service.name}")
+                    ok, message = upload_to_sub2api(
+                        [saved_account],
+                        service.api_url,
+                        service.api_key,
+                        service_id=service.id,
+                    )
+                    log_callback(f"[Sub2API] {'成功' if ok else '失败'}({service.name}): {message}")
+                except Exception as exc:
+                    log_callback(f"[Sub2API] 异常({service_id}): {exc}")
+        except Exception as exc:
+            log_callback(f"[Sub2API] 上传异常: {exc}")
+
+    if auto_upload_tm and saved_account.access_token:
+        try:
+            from ...core.upload.team_manager_upload import upload_to_team_manager
+
+            service_ids = tm_service_ids or [s.id for s in crud.get_tm_services(db, enabled=True)]
+            if not service_ids:
+                log_callback("[TM] 无可用 Team Manager 服务，跳过上传")
+
+            for service_id in service_ids:
+                try:
+                    service = crud.get_tm_service_by_id(db, service_id)
+                    if not service:
+                        continue
+                    log_callback(f"[TM] 正在把账号发往服务站: {service.name}")
+                    ok, message = upload_to_team_manager(saved_account, service.api_url, service.api_key)
+                    log_callback(f"[TM] {'成功' if ok else '失败'}({service.name}): {message}")
+                except Exception as exc:
+                    log_callback(f"[TM] 异常({service_id}): {exc}")
+        except Exception as exc:
+            log_callback(f"[TM] 上传异常: {exc}")
+
+
+def _execute_single_registration_attempt(
+    db,
+    task_uuid: str,
+    email_service_type: str,
+    email_service_id: Optional[int],
+    email_service_config: Optional[dict],
+    actual_proxy_url: Optional[str],
+    proxy_id: Optional[int],
+    selection_index: int,
+    random_email_service: bool,
+    random_outlook_account: bool,
+    random_domain: bool,
+    selected_email_addresses: List[str],
+    selected_domains: List[str],
+    log_callback,
+) -> Tuple[RegistrationResult, str]:
+    """执行一次完整的注册尝试，成功后保证账号已落库。"""
+    selection = RegistrationSelectionRequest(
+        random_email_service=random_email_service,
+        random_outlook_account=random_outlook_account,
+        random_domain=random_domain,
+        selected_email_addresses=selected_email_addresses or [],
+        selected_domains=selected_domains or [],
+        selection_index=selection_index,
+    )
+    resolved_service = resolve_email_service_for_registration(
+        db=db,
+        service_type=EmailServiceType(email_service_type),
+        requested_service_id=email_service_id,
+        fallback_config=email_service_config,
+        proxy_url=actual_proxy_url,
+        selection=selection,
+        log_callback=log_callback,
+    )
+
+    if resolved_service.email_service_id:
+        crud.update_registration_task(
+            db,
+            task_uuid,
+            email_service_id=resolved_service.email_service_id,
+        )
+
+    task_manager.update_status(
+        task_uuid,
+        "running",
+        email_service=resolved_service.service_type.value,
+    )
+
+    email_service = EmailServiceFactory.create(
+        resolved_service.service_type,
+        resolved_service.config,
+        name=resolved_service.service_name,
+    )
+    engine = RegistrationEngine(
+        email_service=email_service,
+        proxy_url=actual_proxy_url,
+        callback_logger=log_callback,
+        task_uuid=task_uuid,
+    )
+    result = engine.run()
+    if not result.success:
+        raise RuntimeError(result.error_message or "注册失败")
+
+    update_proxy_usage(db, proxy_id)
+    if not engine.save_to_database(result):
+        raise RuntimeError("注册成功但保存到数据库失败")
+
+    return result, resolved_service.service_type.value
 
 
 def _run_sync_registration_task(
@@ -246,215 +509,227 @@ def _run_sync_registration_task(
     这个函数会被 run_in_executor 调用，运行在独立线程中
     """
     with get_db() as db:
-        try:
-            # 检查是否已取消
-            if task_manager.is_cancelled(task_uuid):
-                logger.info(f"任务 {task_uuid} 已取消，跳过执行")
-                return
+        max_attempts = _get_max_registration_attempts()
+        last_error: Optional[str] = None
+        last_email: Optional[str] = None
+        last_email_service: Optional[str] = None
 
-            # 更新任务状态为运行中
+        try:
             task = crud.update_registration_task(
                 db, task_uuid,
                 status="running",
-                started_at=datetime.utcnow()
+                started_at=datetime.utcnow(),
+                completed_at=None,
+                error_message=None,
             )
-
             if not task:
                 logger.error(f"任务不存在: {task_uuid}")
                 return
 
-            # 更新 TaskManager 状态
-            task_manager.update_status(task_uuid, "running")
+            if task_manager.is_cancelled(task_uuid):
+                _mark_task_cancelled(db, task_uuid, attempt=0, max_attempts=max_attempts)
+                logger.info(f"任务 {task_uuid} 已取消，跳过执行")
+                return
 
-            # 确定使用的代理
-            # 如果前端传入了代理参数，使用传入的
-            # 否则从代理列表或系统设置中获取
             actual_proxy_url = proxy
             proxy_id = None
-
             if not actual_proxy_url:
                 actual_proxy_url, proxy_id = get_proxy_for_registration(db)
                 if actual_proxy_url:
                     logger.info(f"任务 {task_uuid} 使用代理: {actual_proxy_url[:50]}...")
 
-            # 更新任务的代理记录
             crud.update_registration_task(db, task_uuid, proxy=actual_proxy_url)
-
             log_callback = task_manager.create_log_callback(task_uuid, prefix=log_prefix, batch_id=batch_id)
-            selection = RegistrationSelectionRequest(
-                random_email_service=random_email_service,
-                random_outlook_account=random_outlook_account,
-                random_domain=random_domain,
-                selected_email_addresses=selected_email_addresses or [],
-                selected_domains=selected_domains or [],
-                selection_index=selection_index,
-            )
-            resolved_service = resolve_email_service_for_registration(
-                db=db,
-                service_type=EmailServiceType(email_service_type),
-                requested_service_id=email_service_id,
-                fallback_config=email_service_config,
-                proxy_url=actual_proxy_url,
-                selection=selection,
-                log_callback=log_callback,
+            task_manager.update_status(
+                task_uuid,
+                "running",
+                attempt=0,
+                max_attempts=max_attempts,
+                retrying=False,
+                last_error=None,
+                next_retry_in_seconds=None,
+                email_service=email_service_type or None,
             )
 
-            if resolved_service.email_service_id:
+            for attempt in range(1, max_attempts + 1):
+                if task_manager.is_cancelled(task_uuid):
+                    _mark_task_cancelled(
+                        db,
+                        task_uuid,
+                        attempt=attempt - 1,
+                        max_attempts=max_attempts,
+                        error_message=last_error,
+                        email=last_email,
+                        email_service=last_email_service,
+                    )
+                    logger.info(f"任务 {task_uuid} 在第 {attempt} 次尝试前已取消")
+                    return
+
+                task_manager.update_status(
+                    task_uuid,
+                    "running",
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    retrying=False,
+                    last_error=last_error,
+                    next_retry_in_seconds=None,
+                    email=last_email,
+                    email_service=last_email_service,
+                )
+                log_callback(f"[系统] 开始第 {attempt}/{max_attempts} 次注册尝试")
+
+                try:
+                    result, email_service_value = _execute_single_registration_attempt(
+                        db=db,
+                        task_uuid=task_uuid,
+                        email_service_type=email_service_type,
+                        email_service_id=email_service_id,
+                        email_service_config=email_service_config,
+                        actual_proxy_url=actual_proxy_url,
+                        proxy_id=proxy_id,
+                        selection_index=selection_index,
+                        random_email_service=random_email_service,
+                        random_outlook_account=random_outlook_account,
+                        random_domain=random_domain,
+                        selected_email_addresses=selected_email_addresses or [],
+                        selected_domains=selected_domains or [],
+                        log_callback=log_callback,
+                    )
+                    last_email = result.email
+                    last_email_service = email_service_value
+
+                    task_manager.update_status(
+                        task_uuid,
+                        "running",
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        retrying=False,
+                        last_error=None,
+                        next_retry_in_seconds=None,
+                        email=result.email,
+                        email_service=email_service_value,
+                    )
+
+                    _perform_registration_uploads(
+                        db,
+                        account_email=result.email,
+                        log_callback=log_callback,
+                        auto_upload_cpa=auto_upload_cpa,
+                        cpa_service_ids=cpa_service_ids or [],
+                        auto_upload_sub2api=auto_upload_sub2api,
+                        sub2api_service_ids=sub2api_service_ids or [],
+                        auto_upload_tm=auto_upload_tm,
+                        tm_service_ids=tm_service_ids or [],
+                    )
+
+                    crud.update_registration_task(
+                        db,
+                        task_uuid,
+                        status="completed",
+                        completed_at=datetime.utcnow(),
+                        result=result.to_dict(),
+                        error_message=None,
+                    )
+                    task_manager.update_status(
+                        task_uuid,
+                        "completed",
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        retrying=False,
+                        last_error=None,
+                        next_retry_in_seconds=None,
+                        email=result.email,
+                        email_service=email_service_value,
+                    )
+                    logger.info(f"注册任务完成: {task_uuid}, 邮箱: {result.email}")
+                    return
+                except Exception as exc:
+                    last_error = str(exc)
+                    logger.warning(f"注册任务第 {attempt}/{max_attempts} 次尝试失败: {task_uuid}, 原因: {last_error}")
+
+                if attempt < max_attempts:
+                    wait_seconds = _get_retry_wait_seconds(attempt)
+                    log_callback(f"[系统] 第 {attempt}/{max_attempts} 次尝试失败: {last_error}")
+                    log_callback(f"[系统] 将在 {wait_seconds} 秒后自动重试")
+                    crud.update_registration_task(
+                        db,
+                        task_uuid,
+                        status="running",
+                        error_message=last_error,
+                    )
+                    task_manager.update_status(
+                        task_uuid,
+                        "running",
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        retrying=True,
+                        last_error=last_error,
+                        error=last_error,
+                        next_retry_in_seconds=wait_seconds,
+                        email=last_email,
+                        email_service=last_email_service,
+                    )
+                    if not _wait_for_retry_or_cancel(task_uuid, wait_seconds):
+                        _mark_task_cancelled(
+                            db,
+                            task_uuid,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            error_message=last_error,
+                            email=last_email,
+                            email_service=last_email_service,
+                        )
+                        logger.info(f"任务 {task_uuid} 在重试等待期间已取消")
+                        return
+                    continue
+
+                log_callback(f"[错误] 重试已耗尽，任务失败: {last_error}")
                 crud.update_registration_task(
                     db,
                     task_uuid,
-                    email_service_id=resolved_service.email_service_id,
-                )
-
-            email_service = EmailServiceFactory.create(
-                resolved_service.service_type,
-                resolved_service.config,
-                name=resolved_service.service_name,
-            )
-
-            # 创建注册引擎 - 使用 TaskManager 的日志回调
-
-            engine = RegistrationEngine(
-                email_service=email_service,
-                proxy_url=actual_proxy_url,
-                callback_logger=log_callback,
-                task_uuid=task_uuid
-            )
-
-            # 执行注册
-            result = engine.run()
-
-            if result.success:
-                # 更新代理使用时间
-                update_proxy_usage(db, proxy_id)
-
-                # 保存到数据库
-                engine.save_to_database(result)
-
-                # 自动上传到 CPA（可多服务）
-                if auto_upload_cpa:
-                    try:
-                        from ...core.upload.cpa_upload import upload_to_cpa, generate_token_json
-                        from ...database.models import Account as AccountModel
-                        saved_account = db.query(AccountModel).filter_by(email=result.email).first()
-                        if saved_account and saved_account.access_token:
-                            token_data = generate_token_json(saved_account)
-                            _cpa_ids = cpa_service_ids or []
-                            if not _cpa_ids:
-                                # 未指定则取所有启用的服务
-                                _cpa_ids = [s.id for s in crud.get_cpa_services(db, enabled=True)]
-                            if not _cpa_ids:
-                                log_callback("[CPA] 无可用 CPA 服务，跳过上传")
-                            for _sid in _cpa_ids:
-                                try:
-                                    _svc = crud.get_cpa_service_by_id(db, _sid)
-                                    if not _svc:
-                                        continue
-                                    log_callback(f"[CPA] 正在把账号打包发往服务站: {_svc.name}")
-                                    _ok, _msg = upload_to_cpa(token_data, api_url=_svc.api_url, api_token=_svc.api_token)
-                                    if _ok:
-                                        saved_account.cpa_uploaded = True
-                                        saved_account.cpa_uploaded_at = datetime.utcnow()
-                                        db.commit()
-                                        log_callback(f"[CPA] 投递成功，服务站已签收: {_svc.name}")
-                                    else:
-                                        log_callback(f"[CPA] 上传失败({_svc.name}): {_msg}")
-                                except Exception as _e:
-                                    log_callback(f"[CPA] 异常({_sid}): {_e}")
-                    except Exception as cpa_err:
-                        log_callback(f"[CPA] 上传异常: {cpa_err}")
-
-                # 自动上传到 Sub2API（可多服务）
-                if auto_upload_sub2api:
-                    try:
-                        from ...core.upload.sub2api_upload import upload_to_sub2api
-                        from ...database.models import Account as AccountModel
-                        saved_account = db.query(AccountModel).filter_by(email=result.email).first()
-                        if saved_account and saved_account.access_token:
-                            _s2a_ids = sub2api_service_ids or []
-                            if not _s2a_ids:
-                                _s2a_ids = [s.id for s in crud.get_sub2api_services(db, enabled=True)]
-                            if not _s2a_ids:
-                                log_callback("[Sub2API] 无可用 Sub2API 服务，跳过上传")
-                            for _sid in _s2a_ids:
-                                try:
-                                    _svc = crud.get_sub2api_service_by_id(db, _sid)
-                                    if not _svc:
-                                        continue
-                                    log_callback(f"[Sub2API] 正在把账号发往服务站: {_svc.name}")
-                                    _ok, _msg = upload_to_sub2api([saved_account], _svc.api_url, _svc.api_key)
-                                    log_callback(f"[Sub2API] {'成功' if _ok else '失败'}({_svc.name}): {_msg}")
-                                except Exception as _e:
-                                    log_callback(f"[Sub2API] 异常({_sid}): {_e}")
-                    except Exception as s2a_err:
-                        log_callback(f"[Sub2API] 上传异常: {s2a_err}")
-
-                # 自动上传到 Team Manager（可多服务）
-                if auto_upload_tm:
-                    try:
-                        from ...core.upload.team_manager_upload import upload_to_team_manager
-                        from ...database.models import Account as AccountModel
-                        saved_account = db.query(AccountModel).filter_by(email=result.email).first()
-                        if saved_account and saved_account.access_token:
-                            _tm_ids = tm_service_ids or []
-                            if not _tm_ids:
-                                _tm_ids = [s.id for s in crud.get_tm_services(db, enabled=True)]
-                            if not _tm_ids:
-                                log_callback("[TM] 无可用 Team Manager 服务，跳过上传")
-                            for _sid in _tm_ids:
-                                try:
-                                    _svc = crud.get_tm_service_by_id(db, _sid)
-                                    if not _svc:
-                                        continue
-                                    log_callback(f"[TM] 正在把账号发往服务站: {_svc.name}")
-                                    _ok, _msg = upload_to_team_manager(saved_account, _svc.api_url, _svc.api_key)
-                                    log_callback(f"[TM] {'成功' if _ok else '失败'}({_svc.name}): {_msg}")
-                                except Exception as _e:
-                                    log_callback(f"[TM] 异常({_sid}): {_e}")
-                    except Exception as tm_err:
-                        log_callback(f"[TM] 上传异常: {tm_err}")
-
-                # 更新任务状态
-                crud.update_registration_task(
-                    db, task_uuid,
-                    status="completed",
-                    completed_at=datetime.utcnow(),
-                    result=result.to_dict()
-                )
-
-                # 更新 TaskManager 状态
-                task_manager.update_status(task_uuid, "completed", email=result.email)
-
-                logger.info(f"注册任务完成: {task_uuid}, 邮箱: {result.email}")
-            else:
-                # 更新任务状态为失败
-                crud.update_registration_task(
-                    db, task_uuid,
                     status="failed",
                     completed_at=datetime.utcnow(),
-                    error_message=result.error_message
+                    error_message=last_error,
                 )
-
-                # 更新 TaskManager 状态
-                task_manager.update_status(task_uuid, "failed", error=result.error_message)
-
-                logger.warning(f"注册任务失败: {task_uuid}, 原因: {result.error_message}")
+                task_manager.update_status(
+                    task_uuid,
+                    "failed",
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    retrying=False,
+                    last_error=last_error,
+                    error=last_error,
+                    next_retry_in_seconds=None,
+                    email=last_email,
+                    email_service=last_email_service,
+                )
+                logger.warning(f"注册任务失败: {task_uuid}, 原因: {last_error}")
+                return
 
         except Exception as e:
             logger.error(f"注册任务异常: {task_uuid}, 错误: {e}")
 
             try:
-                with get_db() as db:
-                    crud.update_registration_task(
-                        db, task_uuid,
-                        status="failed",
-                        completed_at=datetime.utcnow(),
-                        error_message=str(e)
-                    )
-
-                # 更新 TaskManager 状态
-                task_manager.update_status(task_uuid, "failed", error=str(e))
-            except:
+                crud.update_registration_task(
+                    db,
+                    task_uuid,
+                    status="failed",
+                    completed_at=datetime.utcnow(),
+                    error_message=str(e),
+                )
+                task_manager.update_status(
+                    task_uuid,
+                    "failed",
+                    attempt=None,
+                    max_attempts=max_attempts,
+                    retrying=False,
+                    last_error=str(e),
+                    error=str(e),
+                    next_retry_in_seconds=None,
+                    email=last_email,
+                    email_service=last_email_service,
+                )
+            except Exception:
                 pass
 
 
@@ -490,7 +765,16 @@ async def run_registration_task(
         task_manager.set_loop(loop)
 
     # 初始化 TaskManager 状态
-    task_manager.update_status(task_uuid, "pending")
+    task_manager.update_status(
+        task_uuid,
+        "pending",
+        attempt=0,
+        max_attempts=_get_max_registration_attempts(),
+        retrying=False,
+        last_error=None,
+        next_retry_in_seconds=None,
+        email_service=email_service_type or None,
+    )
     task_manager.add_log(task_uuid, f"{log_prefix} [系统] 任务 {task_uuid[:8]} 已加入队列" if log_prefix else f"[系统] 任务 {task_uuid[:8]} 已加入队列")
 
     try:
@@ -521,7 +805,17 @@ async def run_registration_task(
     except Exception as e:
         logger.error(f"线程池执行异常: {task_uuid}, 错误: {e}")
         task_manager.add_log(task_uuid, f"[错误] 线程池执行异常: {str(e)}")
-        task_manager.update_status(task_uuid, "failed", error=str(e))
+        task_manager.update_status(
+            task_uuid,
+            "failed",
+            attempt=None,
+            max_attempts=_get_max_registration_attempts(),
+            retrying=False,
+            last_error=str(e),
+            error=str(e),
+            next_retry_in_seconds=None,
+            email_service=email_service_type or None,
+        )
 
 
 def _init_batch_state(batch_id: str, task_uuids: List[str]):
@@ -923,6 +1217,7 @@ async def get_batch_status(batch_id: str):
         raise HTTPException(status_code=404, detail="批量任务不存在")
 
     batch = batch_tasks[batch_id]
+    runtime_status = task_manager.get_batch_status(batch_id) or {}
     return {
         "batch_id": batch_id,
         "total": batch["total"],
@@ -932,6 +1227,7 @@ async def get_batch_status(batch_id: str):
         "current_index": batch["current_index"],
         "cancelled": batch["cancelled"],
         "finished": batch.get("finished", False),
+        "status": runtime_status.get("status", "running"),
         "progress": f"{batch['completed']}/{batch['total']}"
     }
 
@@ -992,11 +1288,19 @@ async def get_task_logs(task_uuid: str):
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
 
-        logs = task.logs or ""
+        response = task_to_response(task)
         return {
             "task_uuid": task_uuid,
-            "status": task.status,
-            "logs": logs.split("\n") if logs else []
+            "status": response.status,
+            "logs": _combine_task_logs(task_uuid, task.logs),
+            "error_message": response.error_message,
+            "attempt": response.attempt,
+            "max_attempts": response.max_attempts,
+            "retrying": response.retrying,
+            "last_error": response.last_error,
+            "next_retry_in_seconds": response.next_retry_in_seconds,
+            "email": response.email,
+            "email_service": response.email_service,
         }
 
 
@@ -1011,7 +1315,16 @@ async def cancel_task(task_uuid: str):
         if task.status not in ["pending", "running"]:
             raise HTTPException(status_code=400, detail="任务已完成或已取消")
 
+        task_manager.cancel_task(task_uuid)
         task = crud.update_registration_task(db, task_uuid, status="cancelled")
+        task_manager.update_status(
+            task_uuid,
+            "cancelling",
+            attempt=(task_manager.get_status(task_uuid) or {}).get("attempt"),
+            max_attempts=(task_manager.get_status(task_uuid) or {}).get("max_attempts"),
+            retrying=False,
+            next_retry_in_seconds=None,
+        )
 
         return {"success": True, "message": "任务已取消"}
 
@@ -1495,6 +1808,7 @@ async def get_outlook_batch_status(batch_id: str):
         raise HTTPException(status_code=404, detail="批量任务不存在")
 
     batch = batch_tasks[batch_id]
+    runtime_status = task_manager.get_batch_status(batch_id) or {}
     return {
         "batch_id": batch_id,
         "total": batch["total"],
@@ -1505,6 +1819,7 @@ async def get_outlook_batch_status(batch_id: str):
         "current_index": batch["current_index"],
         "cancelled": batch["cancelled"],
         "finished": batch.get("finished", False),
+        "status": runtime_status.get("status", "running"),
         "logs": batch.get("logs", []),
         "progress": f"{batch['completed']}/{batch['total']}"
     }

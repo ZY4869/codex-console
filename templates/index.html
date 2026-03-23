@@ -169,6 +169,7 @@
                 <a href="/email-services" class="nav-link">邮箱服务</a>
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/team" class="nav-link">Team 创建</a>
+                <a href="/team/invite" class="nav-link">Team 邀请</a>
                 <a href="/settings" class="nav-link">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
             </div>
@@ -214,7 +215,7 @@
                                         </label>
                                         <label id="random-domain-group" style="display: none; align-items: center; gap: var(--spacing-sm); cursor: pointer; margin-top: 6px;">
                                             <input type="checkbox" id="random-domain">
-                                            <span>随机选域名</span>
+                                            <span>随机选域名（仅勾选时随机）</span>
                                         </label>
                                         <div id="service-options-section" style="display: none; margin-top: var(--spacing-sm);">
                                             <div style="display: flex; justify-content: space-between; align-items: center; gap: var(--spacing-sm); margin-bottom: var(--spacing-xs);">
@@ -229,7 +230,7 @@
                                                     <button type="button" class="btn btn-ghost btn-sm" id="domain-select-all-btn">全选</button>
                                                     <button type="button" class="btn btn-ghost btn-sm" id="domain-select-clear-btn">清空</button>
                                                 </div>
-                                                <div class="selection-note">可选择部分或全部域名。批量模式下未开启随机时会按所选顺序轮转。</div>
+                                                <div class="selection-note">可选择部分或全部域名。只有勾选“随机选域名”后才会随机；未勾选时，单次注册使用第 1 个选中域名，批量注册按所选顺序轮转。</div>
                                             </div>
                                             <div class="form-group" id="email-address-select-group" style="display: none; margin-bottom: 0;">
                                                 <label style="font-size: 0.8125rem;">可选邮箱地址</label>
@@ -238,7 +239,7 @@
                                                     <button type="button" class="btn btn-ghost btn-sm" id="email-address-select-all-btn">全选</button>
                                                     <button type="button" class="btn btn-ghost btn-sm" id="email-address-select-clear-btn">清空</button>
                                                 </div>
-                                                <div class="selection-note">会从邮箱 API 读取已有地址，你可以只选一部分，也可以全选。</div>
+                                                <div class="selection-note">会从邮箱 API 读取已有地址。多选地址默认按顺序轮转，不会随机；“随机选 Outlook 账号”只影响 Outlook 账号选择。</div>
                                             </div>
                                         </div>
                                     </div>
@@ -349,6 +350,12 @@
                                     </label>
                                     <div id="sub2api-service-select-group" style="display:none; margin-top: 6px; margin-bottom: 8px; padding-left: 4px;">
                                         <div class="multi-select-dropdown" id="sub2api-service-select"></div>
+                                        <div id="sub2api-group-summary" style="display:none; margin-top: 8px; padding: 8px 10px; border: 1px dashed var(--border-light); border-radius: var(--radius); background: var(--surface-hover);">
+                                            <div style="font-size: 0.8rem; font-weight: 600; margin-bottom: 6px;">上传分组</div>
+                                            <div id="sub2api-group-summary-content" style="font-size: 0.78rem; color: var(--text-muted); line-height: 1.6;">
+                                                正在读取默认分组...
+                                            </div>
+                                        </div>
                                     </div>
 
                                     <!-- Team Manager -->

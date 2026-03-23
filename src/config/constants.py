@@ -76,6 +76,7 @@ OPENAI_PAGE_TYPES = {
     "EMAIL_OTP_VERIFICATION": "email_otp_verification",  # 已注册账号，需要 OTP 验证
     "PASSWORD_REGISTRATION": "create_account_password",  # 新账号，需要设置密码
     "LOGIN_PASSWORD": "login_password",  # 登录流程，需要输入密码
+    "CODEX_CONSENT": "sign_in_with_chatgpt_codex_consent",  # Codex 授权同意页
 }
 
 # ============================================================================

@@ -14,11 +14,21 @@ from pydantic import BaseModel
 
 from ...config.constants import AccountStatus
 from ...config.settings import get_settings
+from ...core.openai.account_sensitive_info import (
+    SENSITIVE_SESSION_PAYLOAD_KEY,
+    SENSITIVE_SESSION_PAYLOAD_UPDATED_AT_KEY,
+    build_account_sensitive_session_payload,
+    persist_account_sensitive_session_payload,
+)
 from ...core.openai.token_refresh import refresh_account_token as do_refresh
 from ...core.openai.token_refresh import validate_account_token as do_validate
 from ...core.upload.cpa_upload import generate_token_json, batch_upload_to_cpa, upload_to_cpa
 from ...core.upload.team_manager_upload import upload_to_team_manager, batch_upload_to_team_manager
-from ...core.upload.sub2api_upload import batch_upload_to_sub2api, upload_to_sub2api
+from ...core.upload.sub2api_upload import (
+    batch_upload_to_sub2api,
+    prepare_sub2api_export_payload,
+    upload_to_sub2api,
+)
 
 from ...core.dynamic_proxy import get_proxy_url_for_task
 from ...database import crud
@@ -50,6 +60,7 @@ class AccountResponse(BaseModel):
     id: int
     email: str
     password: Optional[str] = None
+    remark: Optional[str] = None
     client_id: Optional[str] = None
     email_service: str
     account_id: Optional[str] = None
@@ -61,7 +72,11 @@ class AccountResponse(BaseModel):
     proxy_used: Optional[str] = None
     cpa_uploaded: bool = False
     cpa_uploaded_at: Optional[str] = None
+    source: Optional[str] = None
+    subscription_type: Optional[str] = None
     cookies: Optional[str] = None
+    has_sensitive_session_payload: bool = False
+    sensitive_session_payload_updated_at: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -80,6 +95,7 @@ class AccountUpdateRequest(BaseModel):
     status: Optional[str] = None
     metadata: Optional[dict] = None
     cookies: Optional[str] = None  # 完整 cookie 字符串，用于支付请求
+    remark: Optional[str] = None
 
 
 class BatchDeleteRequest(BaseModel):
@@ -125,10 +141,12 @@ def resolve_account_ids(
 
 def account_to_response(account: Account) -> AccountResponse:
     """转换 Account 模型为响应模型"""
+    extra_data = account.extra_data or {}
     return AccountResponse(
         id=account.id,
         email=account.email,
         password=account.password,
+        remark=account.remark,
         client_id=account.client_id,
         email_service=account.email_service,
         account_id=account.account_id,
@@ -140,7 +158,11 @@ def account_to_response(account: Account) -> AccountResponse:
         proxy_used=account.proxy_used,
         cpa_uploaded=account.cpa_uploaded or False,
         cpa_uploaded_at=account.cpa_uploaded_at.isoformat() if account.cpa_uploaded_at else None,
+        source=account.source,
+        subscription_type=account.subscription_type,
         cookies=account.cookies,
+        has_sensitive_session_payload=bool(extra_data.get(SENSITIVE_SESSION_PAYLOAD_KEY)),
+        sensitive_session_payload_updated_at=extra_data.get(SENSITIVE_SESSION_PAYLOAD_UPDATED_AT_KEY),
         created_at=account.created_at.isoformat() if account.created_at else None,
         updated_at=account.updated_at.isoformat() if account.updated_at else None,
     )
@@ -222,6 +244,41 @@ async def get_account_tokens(account_id: int):
         }
 
 
+@router.get("/{account_id}/session-payload")
+async def get_account_session_payload(account_id: int):
+    with get_db() as db:
+        account = crud.get_account_by_id(db, account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="账号不存在")
+
+        return build_account_sensitive_session_payload(
+            account,
+            proxy_url=account.proxy_used or get_settings().proxy_url,
+        )
+
+
+@router.post("/{account_id}/session-payload/refresh")
+async def refresh_account_session_payload(account_id: int):
+    with get_db() as db:
+        account = crud.get_account_by_id(db, account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="账号不存在")
+
+        payload = build_account_sensitive_session_payload(
+            account,
+            proxy_url=account.proxy_used or get_settings().proxy_url,
+        )
+        persist_account_sensitive_session_payload(db, account, payload)
+        refreshed = crud.get_account_by_id(db, account_id)
+        extra_data = refreshed.extra_data or {}
+        return {
+            "success": True,
+            "account_id": account_id,
+            "payload": payload,
+            "updated_at": extra_data.get(SENSITIVE_SESSION_PAYLOAD_UPDATED_AT_KEY),
+        }
+
+
 @router.patch("/{account_id}", response_model=AccountResponse)
 async def update_account(account_id: int, request: AccountUpdateRequest):
     """更新账号状态"""
@@ -237,13 +294,16 @@ async def update_account(account_id: int, request: AccountUpdateRequest):
             update_data["status"] = request.status
 
         if request.metadata:
-            current_metadata = account.metadata or {}
+            current_metadata = account.extra_data or {}
             current_metadata.update(request.metadata)
-            update_data["metadata"] = current_metadata
+            update_data["extra_data"] = current_metadata
 
         if request.cookies is not None:
             # 留空则清空，非空则更新
-            update_data["cookies"] = request.cookies or None
+            update_data["cookies"] = request.cookies or ""
+
+        if request.remark is not None:
+            update_data["remark"] = request.remark.strip()
 
         account = crud.update_account(db, account_id, **update_data)
         return account_to_response(account)
@@ -331,6 +391,7 @@ class BatchExportRequest(BaseModel):
     status_filter: Optional[str] = None
     email_service_filter: Optional[str] = None
     search_filter: Optional[str] = None
+    service_id: Optional[int] = None
 
 
 @router.post("/export/json")
@@ -436,52 +497,18 @@ async def export_accounts_csv(request: BatchExportRequest):
 async def export_accounts_sub2api(request: BatchExportRequest):
     """导出账号为 Sub2Api 格式（所有选中账号合并到一个 JSON 的 accounts 数组中）"""
 
-    def make_account_entry(acc) -> dict:
-        expires_at = int(acc.expires_at.timestamp()) if acc.expires_at else 0
-        return {
-            "name": acc.email,
-            "platform": "openai",
-            "type": "oauth",
-            "credentials": {
-                "access_token": acc.access_token or "",
-                "chatgpt_account_id": acc.account_id or "",
-                "chatgpt_user_id": "",
-                "client_id": acc.client_id or "",
-                "expires_at": expires_at,
-                "expires_in": 863999,
-                "model_mapping": {
-                    "gpt-5.1": "gpt-5.1",
-                    "gpt-5.1-codex": "gpt-5.1-codex",
-                    "gpt-5.1-codex-max": "gpt-5.1-codex-max",
-                    "gpt-5.1-codex-mini": "gpt-5.1-codex-mini",
-                    "gpt-5.2": "gpt-5.2",
-                    "gpt-5.2-codex": "gpt-5.2-codex",
-                    "gpt-5.3": "gpt-5.3",
-                    "gpt-5.3-codex": "gpt-5.3-codex",
-                    "gpt-5.4": "gpt-5.4"
-                },
-                "organization_id": acc.workspace_id or "",
-                "refresh_token": acc.refresh_token or ""
-            },
-            "extra": {},
-            "concurrency": 10,
-            "priority": 1,
-            "rate_multiplier": 1,
-            "auto_pause_on_expired": True
-        }
-
     with get_db() as db:
         ids = resolve_account_ids(
             db, request.ids, request.select_all,
             request.status_filter, request.email_service_filter, request.search_filter
         )
         accounts = db.query(Account).filter(Account.id.in_(ids)).all()
+        try:
+            _, payload = prepare_sub2api_export_payload(db, accounts, service_id=request.service_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        payload = {
-            "proxies": [],
-            "accounts": [make_account_entry(acc) for acc in accounts]
-        }
         content = json.dumps(payload, ensure_ascii=False, indent=2)
 
         if len(accounts) == 1:
@@ -794,8 +821,8 @@ async def upload_account_to_cpa(account_id: int, request: Optional[CPAUploadRequ
 class Sub2ApiUploadRequest(BaseModel):
     """单账号 Sub2API 上传请求"""
     service_id: Optional[int] = None
-    concurrency: int = 3
-    priority: int = 50
+    concurrency: Optional[int] = None
+    priority: Optional[int] = None
 
 
 class BatchSub2ApiUploadRequest(BaseModel):
@@ -806,8 +833,8 @@ class BatchSub2ApiUploadRequest(BaseModel):
     email_service_filter: Optional[str] = None
     search_filter: Optional[str] = None
     service_id: Optional[int] = None  # 指定 Sub2API 服务 ID，不传则使用第一个启用的
-    concurrency: int = 3
-    priority: int = 50
+    concurrency: Optional[int] = None
+    priority: Optional[int] = None
 
 
 @router.post("/batch-upload-sub2api")
@@ -844,6 +871,7 @@ async def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
         ids, api_url, api_key,
         concurrency=request.concurrency,
         priority=request.priority,
+        service_id=request.service_id or (svc.id if svc else None),
     )
     return results
 
@@ -853,8 +881,8 @@ async def upload_account_to_sub2api(account_id: int, request: Optional[Sub2ApiUp
     """上传单个账号到 Sub2API"""
 
     service_id = request.service_id if request else None
-    concurrency = request.concurrency if request else 3
-    priority = request.priority if request else 50
+    concurrency = request.concurrency if request else None
+    priority = request.priority if request else None
 
     api_url = None
     api_key = None
@@ -884,7 +912,9 @@ async def upload_account_to_sub2api(account_id: int, request: Optional[Sub2ApiUp
 
         success, message = upload_to_sub2api(
             [account], api_url, api_key,
-            concurrency=concurrency, priority=priority
+            concurrency=concurrency,
+            priority=priority,
+            service_id=service_id or (svc.id if svc else None),
         )
         if success:
             return {"success": True, "message": message}

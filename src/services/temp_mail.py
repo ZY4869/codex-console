@@ -242,13 +242,23 @@ class TempMailService(BaseEmailService):
         import random
         import string
 
-        # 生成随机邮箱名
-        letters = ''.join(random.choices(string.ascii_lowercase, k=5))
-        digits = ''.join(random.choices(string.digits, k=random.randint(1, 3)))
-        suffix = ''.join(random.choices(string.ascii_lowercase, k=random.randint(1, 3)))
-        name = letters + digits + suffix
+        provided_name = str(request_config.get("name") or "").strip()
+        provided_domain = str(request_config.get("domain") or self.config["domain"] or "").strip().lstrip("@")
+        if "@" in provided_name and not request_config.get("domain"):
+            provided_name, _, provided_domain = provided_name.partition("@")
+            provided_name = provided_name.strip()
+            provided_domain = provided_domain.strip().lstrip("@")
 
-        domain = self.config["domain"]
+        if provided_name:
+            name = provided_name
+        else:
+            # 生成随机邮箱名
+            letters = ''.join(random.choices(string.ascii_lowercase, k=5))
+            digits = ''.join(random.choices(string.digits, k=random.randint(1, 3)))
+            suffix = ''.join(random.choices(string.ascii_lowercase, k=random.randint(1, 3)))
+            name = letters + digits + suffix
+
+        domain = provided_domain or self.config["domain"]
         enable_prefix = self.config.get("enable_prefix", True)
 
         body = {

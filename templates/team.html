@@ -8,7 +8,7 @@
     <style>
         .two-column-layout {
             display: grid;
-            grid-template-columns: 340px 1fr;
+            grid-template-columns: 340px minmax(0, 1fr);
             gap: var(--spacing-lg);
             align-items: start;
         }
@@ -20,6 +20,7 @@
             display: flex;
             flex-direction: column;
             gap: var(--spacing-lg);
+            min-width: 0;
         }
         .checkbox-group {
             display: flex;
@@ -38,6 +39,7 @@
             gap: var(--spacing-md);
         }
         .kv-item {
+            min-width: 0;
             background: var(--surface-hover);
             border: 1px solid var(--border);
             border-radius: var(--radius);
@@ -51,7 +53,7 @@
         .kv-item .value {
             font-size: 0.875rem;
             font-weight: 600;
-            word-break: break-all;
+            word-break: break-word;
         }
         .progress-meta {
             display: flex;
@@ -62,19 +64,39 @@
         .table-container table {
             width: 100%;
         }
-        .secret-line {
-            display: flex;
-            align-items: center;
-            gap: var(--spacing-sm);
-            margin-bottom: var(--spacing-sm);
+        .status-note {
+            margin-top: var(--spacing-sm);
+            color: var(--text-secondary);
+            font-size: 0.875rem;
         }
-        .secret-line code {
-            flex: 1;
+        .secret-stack {
+            display: flex;
+            flex-direction: column;
+            gap: var(--spacing-sm);
+        }
+        .secret-line {
+            display: grid;
+            grid-template-columns: 88px minmax(0, 1fr) auto;
+            gap: var(--spacing-sm);
+            align-items: start;
+        }
+        .secret-label {
+            font-weight: 600;
+            padding-top: 6px;
+        }
+        .secret-code {
             display: block;
+            min-width: 0;
+            max-height: 132px;
+            overflow: auto;
             background: var(--surface-hover);
+            border: 1px solid var(--border);
             border-radius: var(--radius-sm);
-            padding: 8px 10px;
-            overflow-x: auto;
+            padding: 10px 12px;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            font-size: 0.8125rem;
         }
         .platform-select {
             display: none;
@@ -82,6 +104,83 @@
         }
         .platform-select.active {
             display: block;
+        }
+        .team-name-builder {
+            display: flex;
+            flex-direction: column;
+            gap: var(--spacing-sm);
+            margin-bottom: var(--spacing-sm);
+        }
+        .team-name-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: var(--spacing-sm);
+            flex-wrap: wrap;
+        }
+        .team-name-toolbar .inline-actions {
+            gap: 6px;
+        }
+        .team-name-meta {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm);
+            flex-wrap: wrap;
+        }
+        .team-name-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            background: var(--surface-hover);
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .team-name-parts {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: var(--spacing-sm);
+        }
+        .team-name-part {
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface-hover);
+            padding: var(--spacing-sm);
+            display: flex;
+            flex-direction: column;
+            gap: var(--spacing-sm);
+        }
+        .team-name-part-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: var(--spacing-sm);
+            flex-wrap: wrap;
+        }
+        .team-name-part-title {
+            font-size: 0.75rem;
+            font-weight: 700;
+            color: var(--text-secondary);
+        }
+        .team-name-part-bucket {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+        .team-name-part-controls {
+            display: grid;
+            grid-template-columns: 120px minmax(0, 1fr) auto;
+            gap: var(--spacing-sm);
+            align-items: center;
+        }
+        .team-name-preview {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+        }
+        .team-name-preview code {
+            font-size: 0.75rem;
         }
         .upload-summary pre {
             background: var(--surface-hover);
@@ -107,6 +206,14 @@
                 grid-template-columns: 1fr;
             }
         }
+        @media (max-width: 720px) {
+            .secret-line {
+                grid-template-columns: 1fr;
+            }
+            .team-name-part-controls {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
 <body>
@@ -121,6 +228,7 @@
                 <a href="/email-services" class="nav-link">邮箱服务</a>
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/team" class="nav-link active">Team 创建</a>
+                <a href="/team/invite" class="nav-link">Team 邀请</a>
                 <a href="/settings" class="nav-link">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
             </div>
@@ -130,7 +238,7 @@
         <main class="main-content">
             <div class="page-header">
                 <h2>Team 创建</h2>
-                <p class="subtitle">注册 5 个同域名账号，等待手动升级 Team 后继续自动邀请、接受与整体上传。</p>
+                <p class="subtitle">注册 5 个同域名账号，等待手动升级 Team 后自动继续邀请、接受与整体上传。</p>
             </div>
 
             <div class="two-column-layout">
@@ -147,15 +255,36 @@
                                 </div>
                                 <div class="form-group">
                                     <label for="workspace-name">Team 名称</label>
-                                    <input id="workspace-name" type="text" value="MyTeam" maxlength="64">
+                                    <div class="team-name-builder">
+                                        <div class="team-name-toolbar">
+                                            <div class="team-name-meta">
+                                                <span class="team-name-chip">每个词位都可随机或指定</span>
+                                                <label for="team-name-word-count">词数</label>
+                                                <select id="team-name-word-count">
+                                                    <option value="2">2 词</option>
+                                                    <option value="3" selected>3 词</option>
+                                                    <option value="4">4 词</option>
+                                                </select>
+                                            </div>
+                                            <div class="inline-actions">
+                                                <button id="team-name-reroll-btn" class="btn btn-ghost btn-sm" type="button">刷新随机词</button>
+                                                <button id="team-name-reset-btn" class="btn btn-ghost btn-sm" type="button">全部设为随机</button>
+                                            </div>
+                                        </div>
+                                        <div id="team-name-parts" class="team-name-parts"></div>
+                                        <div class="status-note" style="margin-top: 0;">随机词位可单独换词；指定词里的空格会自动转成 `-`。</div>
+                                    </div>
+                                    <input id="workspace-name" type="text" value="MyTeam" maxlength="64" readonly>
                                 </div>
                                 <div class="form-group">
                                     <label for="team-proxy">代理</label>
                                     <input id="team-proxy" type="text" placeholder="留空则按系统代理策略选择">
                                 </div>
-
                                 <div class="form-group">
                                     <label>上传平台</label>
+                                    <div class="status-note" style="margin-top: 0; margin-bottom: var(--spacing-sm);">
+                                        创建时可选择自动上传，后续如果忘记勾选，也可以在右侧通过“上传到平台”手动补传。
+                                    </div>
                                     <label class="checkbox-group">
                                         <input id="auto-upload-sub2api" type="checkbox">
                                         <span>Sub2API</span>
@@ -178,7 +307,6 @@
                                         <select id="tm-service-ids" multiple size="4"></select>
                                     </div>
                                 </div>
-
                                 <div class="inline-actions">
                                     <button id="start-team-btn" class="btn btn-primary" type="submit">开始创建 Team</button>
                                     <button id="cancel-team-btn" class="btn btn-danger" type="button" disabled>取消任务</button>
@@ -212,6 +340,7 @@
                                     <div class="value" id="task-team-account-id">-</div>
                                 </div>
                             </div>
+                            <div id="team-status-note" class="status-note">创建任务后，这里会显示当前阶段与自动继续提示。</div>
                         </div>
                     </div>
 
@@ -253,33 +382,37 @@
                         <div class="card-body">
                             <div id="main-account-empty" class="empty-state">主账号注册完成后，这里会展示凭据和 Team 支付链接入口。</div>
                             <div id="main-account-panel" style="display: none;">
-                                <div class="secret-line">
-                                    <strong style="width: 88px;">邮箱</strong>
-                                    <code id="main-account-email">-</code>
-                                    <button class="btn btn-ghost btn-sm" data-copy-target="main-account-email" type="button">复制</button>
+                                <div class="secret-stack">
+                                    <div class="secret-line">
+                                        <div class="secret-label">邮箱</div>
+                                        <code id="main-account-email" class="secret-code">-</code>
+                                        <button class="btn btn-ghost btn-sm" data-copy-target="main-account-email" type="button">复制</button>
+                                    </div>
+                                    <div class="secret-line">
+                                        <div class="secret-label">密码</div>
+                                        <code id="main-account-password" class="secret-code">-</code>
+                                        <button class="btn btn-ghost btn-sm" data-copy-target="main-account-password" type="button">复制</button>
+                                    </div>
+                                    <div class="secret-line">
+                                        <div class="secret-label">Access Token</div>
+                                        <code id="main-account-token" class="secret-code">-</code>
+                                        <button class="btn btn-primary btn-sm" data-copy-target="main-account-token" type="button">一键复制 AT</button>
+                                    </div>
+                                    <div class="secret-line">
+                                        <div class="secret-label">Session Token</div>
+                                        <code id="main-account-session" class="secret-code">-</code>
+                                        <button class="btn btn-ghost btn-sm" data-copy-target="main-account-session" type="button">复制</button>
+                                    </div>
                                 </div>
-                                <div class="secret-line">
-                                    <strong style="width: 88px;">密码</strong>
-                                    <code id="main-account-password">-</code>
-                                    <button class="btn btn-ghost btn-sm" data-copy-target="main-account-password" type="button">复制</button>
-                                </div>
-                                <div class="secret-line">
-                                    <strong style="width: 88px;">Access Token</strong>
-                                    <code id="main-account-token">-</code>
-                                    <button class="btn btn-ghost btn-sm" data-copy-target="main-account-token" type="button">复制</button>
-                                </div>
-                                <div class="secret-line">
-                                    <strong style="width: 88px;">Session Token</strong>
-                                    <code id="main-account-session">-</code>
-                                    <button class="btn btn-ghost btn-sm" data-copy-target="main-account-session" type="button">复制</button>
-                                </div>
-                                <div class="inline-actions">
+                                <div class="inline-actions" style="margin-top: var(--spacing-md);">
                                     <button id="generate-payment-link-btn" class="btn btn-secondary" type="button" disabled>生成 Team 支付链接</button>
+                                    <button id="manual-upload-team-btn" class="btn btn-secondary" type="button" disabled>上传到平台</button>
                                     <button id="continue-team-btn" class="btn btn-primary" type="button" disabled>已完成 Team 订阅，继续</button>
+                                    <button id="goto-team-invite-btn" class="btn btn-secondary" type="button" disabled>转到 Team 邀请控制台继续</button>
                                 </div>
                                 <div style="margin-top: var(--spacing-md);">
                                     <div class="label" style="margin-bottom: 6px; color: var(--text-secondary);">支付链接</div>
-                                    <code id="payment-link-output" style="display: block; min-height: 48px; white-space: pre-wrap;">-</code>
+                                    <code id="payment-link-output" class="secret-code">-</code>
                                 </div>
                             </div>
                         </div>
@@ -309,6 +442,7 @@
     </div>
 
     <script src="/static/js/utils.js?v={{ static_version }}"></script>
+    <script src="/static/js/team_name_builder.js?v={{ static_version }}"></script>
     <script src="/static/js/team.js?v={{ static_version }}"></script>
 </body>
 </html>

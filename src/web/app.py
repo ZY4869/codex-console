@@ -173,6 +173,12 @@ def create_app() -> FastAPI:
             return _redirect_to_login(request)
         return templates.TemplateResponse("team.html", {"request": request})
 
+    @app.get("/team/invite", response_class=HTMLResponse)
+    async def team_invite_page(request: Request):
+        if not _is_authenticated(request):
+            return _redirect_to_login(request)
+        return templates.TemplateResponse("team_invite.html", {"request": request})
+
     @app.on_event("startup")
     async def startup_event():
         """应用启动事件"""

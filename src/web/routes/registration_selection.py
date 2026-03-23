@@ -368,19 +368,23 @@ def _apply_domain_selection(
     if not available_domains:
         return config
 
-    selected_set = {item.lower() for item in selection.selected_domains}
-    domain_pool = [item for item in available_domains if item.lower() in selected_set] if selected_set else available_domains
-    if selected_set and not domain_pool:
+    selected_domains = _ordered_matches(
+        available_domains,
+        selection.selected_domains,
+        value_getter=lambda item: item,
+    )
+    domain_pool = selected_domains or available_domains
+    if selection.selected_domains and not selected_domains:
         raise ValueError("所选域名在当前邮箱服务中不可用")
 
-    if not selection.random_domain and not selected_set:
+    if not selection.random_domain and not selection.selected_domains:
         return config
 
     chosen = _pick_entry(
         domain_pool,
         selection_index=selection.selection_index,
         randomize=selection.random_domain,
-        cycle=bool(selected_set),
+        cycle=bool(selection.selected_domains),
     )
     if service_type == EmailServiceType.MOE_MAIL:
         config["default_domain"] = chosen
@@ -395,9 +399,12 @@ def _apply_domain_selection(
 
 
 def _apply_email_address_selection(service, config: Dict[str, Any], selection: RegistrationSelectionRequest, log_callback: LogCallback) -> Dict[str, Any]:
-    selected_set = {item.lower() for item in selection.selected_email_addresses}
     available_addresses = _normalize_email_options(service.list_emails())
-    address_pool = [item for item in available_addresses if item["email"].lower() in selected_set]
+    address_pool = _ordered_matches(
+        available_addresses,
+        selection.selected_email_addresses,
+        value_getter=lambda item: item["email"],
+    )
     if not address_pool:
         raise ValueError("所选邮箱地址在当前邮箱服务中不可用")
 
@@ -571,6 +578,25 @@ def _pick_entry(items: Sequence[Any], selection_index: int = 0, randomize: bool 
     if cycle and len(items) > 1:
         return list(items)[selection_index % len(items)]
     return list(items)[0]
+
+
+def _ordered_matches(items: Sequence[Any], selected_values: Sequence[str], value_getter: Callable[[Any], str]):
+    """按前端选中顺序筛选候选项，保证批量轮转顺序与用户勾选顺序一致。"""
+    if not selected_values:
+        return list(items)
+
+    normalized_items = {value_getter(item).lower(): item for item in items}
+    result = []
+    seen = set()
+
+    for selected in selected_values:
+        key = selected.lower()
+        if key in seen or key not in normalized_items:
+            continue
+        seen.add(key)
+        result.append(normalized_items[key])
+
+    return result
 
 
 def _log(callback: LogCallback, message: str) -> None:

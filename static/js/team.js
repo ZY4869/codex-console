@@ -7,7 +7,7 @@ const displayedLogs = new Set();
 const statusMeta = {
     pending: { text: '等待中', className: 'pending' },
     registering: { text: '注册中', className: 'running' },
-    waiting_subscription: { text: '待订阅', className: 'pending' },
+    waiting_subscription: { text: '等待订阅', className: 'pending' },
     verifying: { text: '校验订阅', className: 'running' },
     inviting: { text: '发送邀请', className: 'running' },
     accepting: { text: '自动接受', className: 'running' },
@@ -38,6 +38,7 @@ const elements = {
     taskStatusBadge: document.getElementById('task-status-badge'),
     taskEmailDomain: document.getElementById('task-email-domain'),
     taskTeamAccountId: document.getElementById('task-team-account-id'),
+    statusNote: document.getElementById('team-status-note'),
     memberProgressText: document.getElementById('member-progress-text'),
     memberProgressStage: document.getElementById('member-progress-stage'),
     memberProgressBar: document.getElementById('member-progress-bar'),
@@ -50,7 +51,9 @@ const elements = {
     mainAccountSession: document.getElementById('main-account-session'),
     paymentLinkOutput: document.getElementById('payment-link-output'),
     generatePaymentLinkBtn: document.getElementById('generate-payment-link-btn'),
+    manualUploadTeamBtn: document.getElementById('manual-upload-team-btn'),
     continueTeamBtn: document.getElementById('continue-team-btn'),
+    gotoTeamInviteBtn: document.getElementById('goto-team-invite-btn'),
     uploadSummaryOutput: document.getElementById('upload-summary-output'),
     consoleLog: document.getElementById('team-console-log'),
     clearLogBtn: document.getElementById('clear-team-log-btn'),
@@ -67,6 +70,7 @@ const elements = {
 
 document.addEventListener('DOMContentLoaded', async () => {
     bindEvents();
+    window.TeamNameBuilder?.init();
     await Promise.all([
         loadEmailServices(),
         loadUploadServiceOptions('/sub2api-services?enabled=true', elements.sub2apiSelect),
@@ -80,7 +84,9 @@ function bindEvents() {
     elements.form.addEventListener('submit', startTeamCreation);
     elements.cancelBtn.addEventListener('click', cancelTeamTask);
     elements.generatePaymentLinkBtn.addEventListener('click', generatePaymentLink);
+    elements.manualUploadTeamBtn.addEventListener('click', manualUploadTeam);
     elements.continueTeamBtn.addEventListener('click', confirmSubscription);
+    elements.gotoTeamInviteBtn.addEventListener('click', goToTeamInviteConsole);
     elements.clearLogBtn.addEventListener('click', () => {
         displayedLogs.clear();
         elements.consoleLog.innerHTML = '';
@@ -99,7 +105,7 @@ function bindEvents() {
     document.querySelectorAll('[data-copy-target]').forEach((button) => {
         button.addEventListener('click', () => {
             const target = document.getElementById(button.dataset.copyTarget);
-            copyToClipboard(target ? target.textContent || '' : '');
+            copyToClipboard(target ? (target.textContent || '').trim() : '');
         });
     });
 }
@@ -121,7 +127,6 @@ async function loadEmailServices() {
     }
 
     elements.startBtn.disabled = false;
-
     services.forEach((service) => {
         const option = document.createElement('option');
         option.value = String(service.id);
@@ -158,7 +163,8 @@ async function startTeamCreation(event) {
     try {
         const payload = {
             email_service_id: parseInt(elements.emailService.value, 10),
-            workspace_name: elements.workspaceName.value.trim() || 'MyTeam',
+            workspace_name: window.TeamNameBuilder?.getName() || elements.workspaceName.value.trim() || 'MyTeam',
+            workspace_name_parts: window.TeamNameBuilder?.serializeParts() || [],
             proxy: elements.proxy.value.trim() || null,
             auto_upload_sub2api: elements.autoUploadSub2api.checked,
             sub2api_service_ids: getSelectedServiceIds(elements.sub2apiSelect),
@@ -179,6 +185,53 @@ async function startTeamCreation(event) {
 
 function getSelectedServiceIds(select) {
     return Array.from(select.selectedOptions).map((option) => parseInt(option.value, 10));
+}
+
+function buildTeamUploadSelectionPayload() {
+    return {
+        auto_upload_sub2api: elements.autoUploadSub2api.checked,
+        sub2api_service_ids: getSelectedServiceIds(elements.sub2apiSelect),
+        auto_upload_cpa: elements.autoUploadCpa.checked,
+        cpa_service_ids: getSelectedServiceIds(elements.cpaSelect),
+        auto_upload_tm: elements.autoUploadTm.checked,
+        tm_service_ids: getSelectedServiceIds(elements.tmSelect),
+    };
+}
+
+function buildTeamInviteHandoffPayload() {
+    return {
+        source_mode: 'team_task',
+        source_team_task_uuid: currentTaskUuid,
+        existing_account_ids: [],
+        team_source_task_uuids: [],
+        manual_emails: [],
+        proxy: currentTask?.proxy || elements.proxy.value.trim() || null,
+        ...buildTeamUploadSelectionPayload(),
+        sub2api_group_ids_by_service: {},
+        retry_limit: 0,
+    };
+}
+
+function applyUploadConfig(config = {}) {
+    const definitions = [
+        ['auto_upload_sub2api', elements.autoUploadSub2api, elements.sub2apiWrap, elements.sub2apiSelect],
+        ['auto_upload_cpa', elements.autoUploadCpa, elements.cpaWrap, elements.cpaSelect],
+        ['auto_upload_tm', elements.autoUploadTm, elements.tmWrap, elements.tmSelect],
+    ];
+    const selectedMap = {
+        auto_upload_sub2api: new Set((config.sub2api_service_ids || []).map((value) => String(value))),
+        auto_upload_cpa: new Set((config.cpa_service_ids || []).map((value) => String(value))),
+        auto_upload_tm: new Set((config.tm_service_ids || []).map((value) => String(value))),
+    };
+
+    definitions.forEach(([flag, checkbox, wrap, select]) => {
+        const enabled = Boolean(config[flag]);
+        checkbox.checked = enabled;
+        wrap.classList.toggle('active', enabled);
+        Array.from(select.options).forEach((option) => {
+            option.selected = selectedMap[flag].has(option.value);
+        });
+    });
 }
 
 function attachTask(task) {
@@ -240,7 +293,7 @@ async function loadLogs(taskUuid) {
         elements.consoleLog.innerHTML = '';
         (data.logs || []).forEach((line) => addLogLine(line));
     } catch (error) {
-        // 忽略日志加载失败，WebSocket 仍可继续工作
+        // ignore
     }
 }
 
@@ -252,19 +305,38 @@ function renderTask(task) {
     elements.taskEmailDomain.textContent = task.email_domain || '-';
     elements.taskTeamAccountId.textContent = task.team_account_id || '-';
     elements.memberProgressStage.textContent = meta.text;
+    elements.statusNote.textContent = buildStatusNote(task, meta.text);
+    elements.workspaceName.value = task.workspace_name || 'MyTeam';
+    window.TeamNameBuilder?.setFromWorkspaceName(task.workspace_name || 'MyTeam');
+    applyUploadConfig(task.upload_config || {});
 
-    renderMembers(task.members || []);
+    renderMembers(task.members || [], task.stats || {});
     renderMainAccount(task);
     renderUploadSummary(task.result || {});
     updateActionButtons(task.status);
 
     if (['completed', 'failed', 'cancelled'].includes(task.status)) {
         stopStatusPolling();
-        storage.remove('team_active_task_uuid');
     }
 }
 
-function renderMembers(members) {
+function buildStatusNote(task, statusText) {
+    const parts = [];
+    if (task.runtime_message) {
+        parts.push(task.runtime_message);
+    } else {
+        parts.push(`当前阶段：${statusText}`);
+    }
+    if (task.retrying && task.next_retry_in_seconds) {
+        parts.push(`将在 ${task.next_retry_in_seconds} 秒后自动重试`);
+    }
+    if (task.continue_requested && ['pending', 'registering', 'waiting_subscription'].includes(task.status)) {
+        parts.push('已记录继续请求，条件满足后会自动进入第二阶段');
+    }
+    return parts.join(' · ');
+}
+
+function renderMembers(members, stats) {
     if (!members.length) {
         elements.membersBody.innerHTML = '<tr><td colspan="5" class="empty-state">任务创建后会在这里显示 5 个成员。</td></tr>';
         elements.memberProgressText.textContent = '0 / 5';
@@ -272,9 +344,9 @@ function renderMembers(members) {
         return;
     }
 
-    const doneCount = members.filter((member) => member.invitation_status !== 'pending').length;
-    const percent = Math.round((doneCount / Math.max(members.length, 1)) * 100);
-    elements.memberProgressText.textContent = `${doneCount} / ${members.length}`;
+    const completed = stats.registered_members || 0;
+    const percent = Math.round((completed / Math.max(members.length, 1)) * 100);
+    elements.memberProgressText.textContent = `${completed} / ${members.length}`;
     elements.memberProgressBar.style.width = `${percent}%`;
 
     elements.membersBody.innerHTML = members.map((member) => {
@@ -305,14 +377,13 @@ function renderMainAccount(task) {
     elements.mainAccountPassword.textContent = account.password || '-';
     elements.mainAccountToken.textContent = account.access_token || '-';
     elements.mainAccountSession.textContent = account.session_token || '-';
-
-    if (task.status !== 'waiting_subscription' && elements.paymentLinkOutput.textContent.trim() === '') {
+    if (!elements.paymentLinkOutput.textContent.trim()) {
         elements.paymentLinkOutput.textContent = '-';
     }
 }
 
 function renderUploadSummary(result) {
-    if (!result || (!result.upload && !result.team_context)) {
+    if (!result || Object.keys(result).length === 0) {
         elements.uploadSummaryOutput.textContent = '暂无上传结果';
         return;
     }
@@ -322,7 +393,9 @@ function renderUploadSummary(result) {
 function updateActionButtons(status) {
     elements.cancelBtn.disabled = !currentTaskUuid || !['registering', 'waiting_subscription', 'verifying', 'inviting', 'accepting', 'uploading'].includes(status);
     elements.generatePaymentLinkBtn.disabled = !(currentTask && currentTask.main_account && currentTask.main_account.id);
-    elements.continueTeamBtn.disabled = status !== 'waiting_subscription';
+    elements.manualUploadTeamBtn.disabled = !currentTaskUuid;
+    elements.continueTeamBtn.disabled = !currentTaskUuid;
+    elements.gotoTeamInviteBtn.disabled = !currentTaskUuid;
 }
 
 function connectTeamSocket(taskUuid) {
@@ -342,8 +415,12 @@ function connectTeamSocket(taskUuid) {
             addLogLine(payload.message);
         }
         if (payload.type === 'status' && payload.snapshot) {
-            currentTask = payload.snapshot;
-            renderTask(payload.snapshot);
+            const snapshot = { ...payload.snapshot };
+            if (payload.runtime_message && !snapshot.runtime_message) {
+                snapshot.runtime_message = payload.runtime_message;
+            }
+            currentTask = snapshot;
+            renderTask(snapshot);
         }
         if (payload.type === 'ping') {
             teamSocket.send(JSON.stringify({ type: 'pong' }));
@@ -394,15 +471,56 @@ async function confirmSubscription() {
     if (!currentTaskUuid) {
         return;
     }
-    loading.show(elements.continueTeamBtn, '继续中...');
+    loading.show(elements.continueTeamBtn, '提交中...');
     try {
-        await api.post(`/team/${currentTaskUuid}/confirm-subscription`, {});
-        toast.success('已开始执行 Team 邀请与上传流程');
+        const response = await api.post(`/team/${currentTaskUuid}/confirm-subscription`, {});
+        toast.success(response.message || '继续请求已提交');
         fetchTask(currentTaskUuid, false);
     } catch (error) {
-        toast.error(error.message || '启动第二阶段失败');
+        toast.error(error.message || '提交继续请求失败');
     } finally {
         loading.hide(elements.continueTeamBtn);
+    }
+}
+
+async function manualUploadTeam() {
+    if (!currentTaskUuid) {
+        return;
+    }
+
+    const payload = buildTeamUploadSelectionPayload();
+
+    if (!payload.auto_upload_sub2api && !payload.auto_upload_cpa && !payload.auto_upload_tm) {
+        toast.error('请先至少选择一个上传平台');
+        return;
+    }
+
+    loading.show(elements.manualUploadTeamBtn, '上传中...');
+    try {
+        const response = await api.post(`/team/${currentTaskUuid}/upload`, payload);
+        toast.success(response.message || '已开始上传到平台');
+        fetchTask(currentTaskUuid);
+    } catch (error) {
+        toast.error(error.message || '手动上传失败');
+    } finally {
+        loading.hide(elements.manualUploadTeamBtn);
+    }
+}
+
+async function goToTeamInviteConsole() {
+    if (!currentTaskUuid) {
+        return;
+    }
+
+    loading.show(elements.gotoTeamInviteBtn, '创建中...');
+    try {
+        const task = await api.post('/team-invite/create', buildTeamInviteHandoffPayload());
+        storage.set('team_invite_active_task_uuid', task.task_uuid);
+        window.location.href = '/team/invite';
+    } catch (error) {
+        toast.error(error.message || '创建 Team 邀请任务失败');
+    } finally {
+        loading.hide(elements.gotoTeamInviteBtn);
     }
 }
 

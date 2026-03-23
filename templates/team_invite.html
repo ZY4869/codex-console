@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Team 邀请 - OpenAI 注册系统</title>
+    <link rel="stylesheet" href="/static/css/style.css?v={{ static_version }}">
+    <link rel="stylesheet" href="/static/css/team_invite.css?v={{ static_version }}">
+</head>
+<body class="team-invite-page">
+    <div class="container">
+        <nav class="navbar">
+            <div class="nav-brand">
+                <h1>OpenAI 注册系统</h1>
+            </div>
+            <div class="nav-links">
+                <a href="/" class="nav-link">注册</a>
+                <a href="/accounts" class="nav-link">账号管理</a>
+                <a href="/email-services" class="nav-link">邮箱服务</a>
+                <a href="/payment" class="nav-link">支付</a>
+                <a href="/team" class="nav-link">Team 创建</a>
+                <a href="/team/invite" class="nav-link active">Team 邀请</a>
+                <a href="/settings" class="nav-link">设置</a>
+                <a href="/logout" class="nav-link">退出</a>
+            </div>
+            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">主题</button>
+        </nav>
+
+        <main class="main-content">
+            <section class="team-invite-hero">
+                <div class="hero-copy">
+                    <h2>Team Invite Console</h2>
+                    <p>主账号、成员状态、上传结果和实时日志都放在同一个控制台里。</p>
+                </div>
+                <div class="team-invite-topbar">
+                    <span class="invite-pill"><strong>默认邀请</strong>主账号对应 Team 成员</span>
+                    <span class="invite-pill"><strong>支持恢复</strong>继续 / 重新开始</span>
+                </div>
+            </section>
+
+            <div class="team-invite-shell">
+                <aside class="team-side">
+                    <div class="panel-stack sticky-stack">
+                        <div class="card team-invite-card">
+                            <div class="card-header">
+                                <div class="card-header-copy">
+                                    <h3>设置</h3>
+                                </div>
+                            </div>
+                            <div class="card-body panel-stack">
+                                <section class="panel-section">
+                                    <div class="section-title">
+                                        <h4>主账号</h4>
+                                        <span id="source-account-count">0 个可用</span>
+                                    </div>
+                                    <div class="compact-form">
+                                        <div class="form-group">
+                                            <select id="team-source-account-id"></select>
+                                        </div>
+                                        <div id="team-source-summary" class="soft-box">
+                                            <p>选择主账号后展示 Team 摘要</p>
+                                        </div>
+                                    </div>
+                                </section>
+
+                                <section class="panel-section">
+                                    <div class="section-title">
+                                        <h4>自定义账号</h4>
+                                        <span id="custom-account-count">0 个补充</span>
+                                    </div>
+                                    <div class="compact-form">
+                                        <div class="form-group">
+                                            <label for="team-existing-account-ids">现有账号补位</label>
+                                            <select id="team-existing-account-ids" multiple size="4"></select>
+                                        </div>
+                                        <div id="team-capacity-warning" class="warning-banner"></div>
+
+                                        <details class="fold-panel">
+                                            <summary>随机注册新号</summary>
+                                            <div class="fold-body">
+                                                <div class="compact-form">
+                                                    <div class="inline-row">
+                                                        <div class="form-group">
+                                                            <label for="team-register-email-service">邮箱服务</label>
+                                                            <select id="team-register-email-service"></select>
+                                                        </div>
+                                                        <div class="form-group">
+                                                            <label for="team-register-proxy">注册代理</label>
+                                                            <input id="team-register-proxy" type="text" placeholder="留空沿用 Team 代理">
+                                                        </div>
+                                                    </div>
+                                                    <button id="team-register-account-btn" class="btn btn-secondary btn-sm" type="button">注册 1 个新号</button>
+                                                    <div id="team-register-status" class="hint-line">完成后自动回填到补位列表。</div>
+                                                </div>
+                                            </div>
+                                        </details>
+
+                                        <details class="fold-panel">
+                                            <summary>手填邮箱（仅邀请）</summary>
+                                            <div class="fold-body">
+                                                <div class="form-group">
+                                                    <label for="team-manual-emails">手填邮箱</label>
+                                                    <textarea id="team-manual-emails" rows="3" placeholder="每行一个，或逗号/分号分隔"></textarea>
+                                                </div>
+                                            </div>
+                                        </details>
+                                    </div>
+                                </section>
+
+                                <section class="panel-section">
+                                    <div class="section-title">
+                                        <h4>上传平台</h4>
+                                    </div>
+                                    <div class="check-grid">
+                                        <div class="check-card">
+                                            <label>
+                                                <input id="team-upload-sub2api" type="checkbox">
+                                                <span>Sub2API</span>
+                                            </label>
+                                            <div id="team-upload-sub2api-body" class="platform-body">
+                                                <div class="form-group">
+                                                    <label for="team-sub2api-service-ids">服务</label>
+                                                    <select id="team-sub2api-service-ids" multiple size="3"></select>
+                                                </div>
+                                                <div id="team-sub2api-groups" class="group-grid"></div>
+                                                <div id="team-sub2api-name-previews" class="preview-list"></div>
+                                            </div>
+                                        </div>
+
+                                        <div class="check-card">
+                                            <label>
+                                                <input id="team-upload-cpa" type="checkbox">
+                                                <span>CPA</span>
+                                            </label>
+                                            <div id="team-upload-cpa-body" class="platform-body">
+                                                <div class="form-group">
+                                                    <label for="team-cpa-service-ids">服务</label>
+                                                    <select id="team-cpa-service-ids" multiple size="3"></select>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div class="check-card">
+                                            <label>
+                                                <input id="team-upload-tm" type="checkbox">
+                                                <span>Team Manager</span>
+                                            </label>
+                                            <div id="team-upload-tm-body" class="platform-body">
+                                                <div class="form-group">
+                                                    <label for="team-tm-service-ids">服务</label>
+                                                    <select id="team-tm-service-ids" multiple size="3"></select>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </section>
+
+                                <section class="panel-section">
+                                    <div class="section-title">
+                                        <h4>运行配置</h4>
+                                    </div>
+                                    <div class="compact-form">
+                                        <div class="inline-row">
+                                            <div class="form-group">
+                                                <label for="team-retry-limit">重试次数</label>
+                                                <input id="team-retry-limit" type="number" min="0" max="10" value="1">
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="team-task-proxy">代理</label>
+                                                <input id="team-task-proxy" type="text" placeholder="留空自动回退">
+                                            </div>
+                                        </div>
+                                    </div>
+                                </section>
+                            </div>
+                        </div>
+                    </div>
+                </aside>
+
+                <section class="team-main">
+                    <div class="panel-stack">
+                        <div class="card team-invite-card">
+                            <div class="card-header">
+                                <div class="card-header-copy">
+                                    <h3>任务信息</h3>
+                                </div>
+                            </div>
+                            <div class="card-body panel-stack">
+                                <div class="task-command">
+                                    <div class="summary-grid">
+                                        <div class="summary-card summary-card-wide">
+                                            <span>任务 UUID</span>
+                                            <strong id="team-task-uuid">-</strong>
+                                        </div>
+                                        <div class="summary-card">
+                                            <span>当前状态</span>
+                                            <strong id="team-task-status">待选择</strong>
+                                        </div>
+                                        <div class="summary-card">
+                                            <span>Team 成员</span>
+                                            <strong id="team-task-team-count">0</strong>
+                                        </div>
+                                        <div class="summary-card">
+                                            <span>补充账号</span>
+                                            <strong id="team-task-custom-count">0</strong>
+                                        </div>
+                                    </div>
+                                    <div class="invite-actions task-action-grid">
+                                        <button id="team-start-btn" class="btn btn-primary" type="button">开始</button>
+                                        <button id="team-continue-btn" class="btn btn-secondary" type="button" disabled>继续</button>
+                                        <button id="team-restart-btn" class="btn btn-secondary" type="button" disabled>重新开始</button>
+                                        <button id="team-cancel-btn" class="btn btn-danger" type="button" disabled>取消任务</button>
+                                    </div>
+                                </div>
+
+                            </div>
+                        </div>
+
+                        <div class="card team-invite-card">
+                            <div class="card-header">
+                                <div class="card-header-copy">
+                                    <h3>Team 团队</h3>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="team-table-wrap">
+                                    <table class="team-table">
+                                        <thead>
+                                            <tr>
+                                                <th>账号</th>
+                                                <th>状态</th>
+                                                <th>建议</th>
+                                                <th>操作</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="team-members-body">
+                                            <tr>
+                                                <td colspan="4">
+                                                    <div class="empty-panel">还没有可展示的 Team 团队。先选择主账号，或恢复一个已有邀请任务。</div>
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card team-invite-card">
+                            <div class="card-header">
+                                <div class="card-header-copy">
+                                    <h3>账号信息</h3>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div id="team-account-detail" class="empty-panel">点击上方成员后，这里会展示账号详情。</div>
+                            </div>
+                        </div>
+
+                        <div class="card team-invite-card">
+                            <div class="card-header">
+                                <div class="card-header-copy">
+                                    <h3>上传结果</h3>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div id="team-upload-results" class="upload-grid">
+                                    <div class="empty-panel">尚未产生上传结果。</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <aside class="team-log">
+                    <div class="panel-stack log-panel">
+                        <div class="card team-invite-card">
+                            <div class="card-header">
+                                <div class="card-header-copy">
+                                    <h3>实时日志</h3>
+                                </div>
+                                <button id="team-clear-log-btn" class="btn btn-ghost btn-sm" type="button">清空</button>
+                            </div>
+                            <div class="card-body">
+                                <div id="team-log-summary" class="log-summary"></div>
+                                <div id="team-console-log" class="console-log"></div>
+                            </div>
+                        </div>
+                    </div>
+                </aside>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/js/utils.js?v={{ static_version }}"></script>
+    <script src="/static/js/team_invite/state.js?v={{ static_version }}"></script>
+    <script src="/static/js/team_invite/api.js?v={{ static_version }}"></script>
+    <script src="/static/js/team_invite/settings.js?v={{ static_version }}"></script>
+    <script src="/static/js/team_invite/task.js?v={{ static_version }}"></script>
+    <script src="/static/js/team_invite/logs.js?v={{ static_version }}"></script>
+    <script src="/static/js/team_invite/app.js?v={{ static_version }}"></script>
+</body>
+</html>

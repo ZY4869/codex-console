@@ -17,6 +17,8 @@ from .models import (
     Sub2ApiService,
     TeamTask,
     TeamMember,
+    TeamInviteTask,
+    TeamInviteMember,
 )
 
 
@@ -31,6 +33,7 @@ def create_account(
     password: Optional[str] = None,
     client_id: Optional[str] = None,
     session_token: Optional[str] = None,
+    cookies: Optional[str] = None,
     email_service_id: Optional[str] = None,
     account_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
@@ -40,6 +43,7 @@ def create_account(
     proxy_used: Optional[str] = None,
     expires_at: Optional['datetime'] = None,
     extra_data: Optional[Dict[str, Any]] = None,
+    remark: Optional[str] = None,
     status: Optional[str] = None,
     source: Optional[str] = None
 ) -> Account:
@@ -49,6 +53,7 @@ def create_account(
         password=password,
         client_id=client_id,
         session_token=session_token,
+        cookies=cookies,
         email_service=email_service,
         email_service_id=email_service_id,
         account_id=account_id,
@@ -56,6 +61,7 @@ def create_account(
         access_token=access_token,
         refresh_token=refresh_token,
         id_token=id_token,
+        remark=remark,
         proxy_used=proxy_used,
         expires_at=expires_at,
         extra_data=extra_data or {},
@@ -475,6 +481,149 @@ get_registration_task = get_registration_task_by_uuid
 get_team_task = get_team_task_by_uuid
 
 
+def get_team_task_by_id(db: Session, team_task_id: int) -> Optional[TeamTask]:
+    """根据 ID 获取 Team 任务。"""
+    return db.query(TeamTask).filter(TeamTask.id == team_task_id).first()
+
+
+def create_team_invite_task(
+    db: Session,
+    task_uuid: str,
+    source_mode: str,
+    source_account_id: Optional[int] = None,
+    source_team_task_id: Optional[int] = None,
+    proxy: Optional[str] = None,
+    upload_config: Optional[Dict[str, Any]] = None,
+) -> TeamInviteTask:
+    """创建 Team 邀请任务。"""
+    task = TeamInviteTask(
+        task_uuid=task_uuid,
+        source_mode=source_mode,
+        source_account_id=source_account_id,
+        source_team_task_id=source_team_task_id,
+        proxy=proxy,
+        upload_config=upload_config or {},
+        status="pending",
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def get_team_invite_task_by_uuid(db: Session, task_uuid: str) -> Optional[TeamInviteTask]:
+    """根据 UUID 获取 Team 邀请任务。"""
+    return db.query(TeamInviteTask).filter(TeamInviteTask.task_uuid == task_uuid).first()
+
+
+def list_team_invite_tasks(
+    db: Session,
+    status: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+) -> List[TeamInviteTask]:
+    """分页获取 Team 邀请任务。"""
+    query = db.query(TeamInviteTask)
+    if status:
+        query = query.filter(TeamInviteTask.status == status)
+    return query.order_by(desc(TeamInviteTask.created_at)).offset(skip).limit(limit).all()
+
+
+def update_team_invite_task(db: Session, task_uuid: str, **kwargs) -> Optional[TeamInviteTask]:
+    """更新 Team 邀请任务。"""
+    task = get_team_invite_task_by_uuid(db, task_uuid)
+    if not task:
+        return None
+
+    for key, value in kwargs.items():
+        if hasattr(task, key):
+            setattr(task, key, value)
+
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def append_team_invite_task_log(db: Session, task_uuid: str, log_message: str) -> bool:
+    """追加 Team 邀请任务日志。"""
+    task = get_team_invite_task_by_uuid(db, task_uuid)
+    if not task:
+        return False
+
+    task.logs = f"{task.logs}\n{log_message}" if task.logs else log_message
+    db.commit()
+    return True
+
+
+def delete_team_invite_task(db: Session, task_uuid: str) -> bool:
+    """删除 Team 邀请任务。"""
+    task = get_team_invite_task_by_uuid(db, task_uuid)
+    if not task:
+        return False
+
+    db.delete(task)
+    db.commit()
+    return True
+
+
+def create_team_invite_member(
+    db: Session,
+    team_invite_task_id: int,
+    order_index: int,
+    email: str,
+    source_type: str,
+    account_id: Optional[int] = None,
+    source_team_task_id: Optional[int] = None,
+) -> TeamInviteMember:
+    """创建 Team 邀请成员记录。"""
+    member = TeamInviteMember(
+        team_invite_task_id=team_invite_task_id,
+        order_index=order_index,
+        email=email,
+        source_type=source_type,
+        account_id=account_id,
+        source_team_task_id=source_team_task_id,
+        invitation_status="pending",
+    )
+    db.add(member)
+    db.commit()
+    db.refresh(member)
+    return member
+
+
+def get_team_invite_member_by_id(db: Session, member_id: int) -> Optional[TeamInviteMember]:
+    """根据 ID 获取 Team 邀请成员。"""
+    return db.query(TeamInviteMember).filter(TeamInviteMember.id == member_id).first()
+
+
+def get_team_invite_members(db: Session, team_invite_task_id: int) -> List[TeamInviteMember]:
+    """获取 Team 邀请任务下的成员列表。"""
+    return (
+        db.query(TeamInviteMember)
+        .filter(TeamInviteMember.team_invite_task_id == team_invite_task_id)
+        .order_by(asc(TeamInviteMember.order_index))
+        .all()
+    )
+
+
+def update_team_invite_member(db: Session, member_id: int, **kwargs) -> Optional[TeamInviteMember]:
+    """更新 Team 邀请成员。"""
+    member = get_team_invite_member_by_id(db, member_id)
+    if not member:
+        return None
+
+    for key, value in kwargs.items():
+        if hasattr(member, key):
+            setattr(member, key, value)
+
+    db.commit()
+    db.refresh(member)
+    return member
+
+
+get_team_invite_task = get_team_invite_task_by_uuid
+
+
 # ============================================================================
 # 设置 CRUD
 # ============================================================================
@@ -739,6 +888,8 @@ def create_sub2api_service(
     name: str,
     api_url: str,
     api_key: str,
+    template_config: Optional[Dict[str, Any]] = None,
+    next_name_index: int = 1,
     enabled: bool = True,
     priority: int = 0
 ) -> Sub2ApiService:
@@ -747,6 +898,8 @@ def create_sub2api_service(
         name=name,
         api_url=api_url,
         api_key=api_key,
+        template_config=template_config,
+        next_name_index=next_name_index,
         enabled=enabled,
         priority=priority,
     )
