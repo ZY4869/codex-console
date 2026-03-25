@@ -122,6 +122,46 @@
         }
     }
 
+    async function handleStartTask() {
+        const sourceMode = app.getSelectedSourceMode();
+        const payload = app.settings.buildCreatePayload();
+        if (sourceMode === 'custom_domain_email') {
+            const selection = app.getCustomSourceSelection();
+            if (!selection.email) {
+                toast.warning('请先输入自定义主号邮箱');
+                return;
+            }
+            if (!selection.serviceType) {
+                toast.warning('请选择自定义主号的邮箱服务类型');
+                return;
+            }
+            if (!selection.account) {
+                toast.warning('当前邮箱还没有匹配到可用的本地账号');
+                return;
+            }
+        } else if (!payload.source_account_id) {
+            toast.warning('请选择一个可用的 Team 主账号');
+            return;
+        }
+
+        loading.show(elements.startBtn, '启动中...');
+        try {
+            const task = await app.api.createTask(payload);
+            state.selectedMemberKey = null;
+            state.selectedAccountDetail = null;
+            await app.taskView.attachTask(task, {
+                mode: 'task',
+                hydrateConfig: true,
+                reloadLogs: true,
+            });
+            toast.success('Team 邀请任务已启动');
+        } catch (error) {
+            toast.error(error.message || '启动 Team 邀请任务失败');
+        } finally {
+            loading.hide(elements.startBtn);
+        }
+    }
+
     function bindEvents() {
         elements.startBtn.addEventListener('click', handleStartTask);
         elements.continueBtn.addEventListener('click', handleResumeTask);

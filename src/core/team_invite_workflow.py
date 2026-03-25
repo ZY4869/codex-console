@@ -118,18 +118,21 @@ def _build_selected_platforms(upload_config: Optional[Dict[str, Any]]) -> List[D
             "enabled": bool(config.get("auto_upload_sub2api")),
             "service_ids": list(config.get("sub2api_service_ids") or []),
             "group_ids_by_service": dict(config.get("sub2api_group_ids_by_service") or {}),
+            "include_source_account": bool(config.get("include_source_account_upload")),
         },
         {
             "key": "cpa",
             "label": "CPA",
             "enabled": bool(config.get("auto_upload_cpa")),
             "service_ids": list(config.get("cpa_service_ids") or []),
+            "include_source_account": bool(config.get("include_source_account_upload")),
         },
         {
             "key": "tm",
             "label": "Team Manager",
             "enabled": bool(config.get("auto_upload_tm")),
             "service_ids": list(config.get("tm_service_ids") or []),
+            "include_source_account": bool(config.get("include_source_account_upload")),
         },
     ]
 
@@ -159,6 +162,132 @@ def _build_sub2api_copy_result(detail: Dict[str, Any]) -> Dict[str, Any]:
     if detail.get("guard_blocked") is not None:
         copy_result["guard_blocked"] = bool(detail.get("guard_blocked"))
     return copy_result
+
+
+def _build_account_platform_uploads(
+    account_id: Optional[int],
+    upload_results: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not account_id or not isinstance(upload_results, dict):
+        return {}
+
+    platform_uploads: Dict[str, Any] = {}
+    normalized_account_id = str(account_id)
+    for platform_key, platform_result in upload_results.items():
+        if platform_key in {"team_context", "noop"} or not isinstance(platform_result, dict):
+            continue
+
+        details = [
+            detail
+            for detail in (platform_result.get("details") or [])
+            if str(detail.get("id") or "").strip() == normalized_account_id
+        ]
+        if not details:
+            continue
+
+        success = all(bool(detail.get("success")) for detail in details)
+        reason_codes: List[str] = []
+        guard_messages: List[str] = []
+        guard_blocked = False
+        for detail in details:
+            reason_code = str(detail.get("reason_code") or "").strip()
+            if reason_code and reason_code not in reason_codes:
+                reason_codes.append(reason_code)
+            guard_message = str(detail.get("guard_message") or "").strip()
+            if guard_message and guard_message not in guard_messages:
+                guard_messages.append(guard_message)
+            guard_blocked = guard_blocked or bool(detail.get("guard_blocked"))
+
+        if platform_key == "sub2api":
+            copies = [
+                _build_sub2api_copy_result(detail)
+                for detail in details
+                if any(
+                    detail.get(field) is not None
+                    for field in ("generated_name", "group_id", "group_name", "copy_index")
+                )
+            ]
+            success_count = sum(1 for item in copies if item.get("success"))
+            failed_count = sum(1 for item in copies if not item.get("success"))
+            entry: Dict[str, Any] = {
+                "success": success,
+                "copies": copies,
+                "copy_total": len(copies),
+                "success_count": success_count,
+                "failed_count": failed_count,
+            }
+            if success:
+                entry["message"] = (
+                    f"已完成 {len(copies)} 份副本上传，成功 {success_count} 份"
+                    if copies
+                    else "上传成功"
+                )
+            else:
+                entry["message"] = (
+                    f"已处理 {len(copies)} 份副本，成功 {success_count} 份，失败 {failed_count} 份"
+                    if copies
+                    else None
+                )
+                entry["error"] = "；".join(
+                    str(detail.get("error") or detail.get("message") or "").strip()
+                    for detail in details
+                    if not detail.get("success")
+                ) or "上传失败"
+        else:
+            messages = [
+                str(detail.get("message") or "").strip()
+                for detail in details
+                if detail.get("success") and detail.get("message")
+            ]
+            errors = [
+                str(detail.get("error") or detail.get("message") or "").strip()
+                for detail in details
+                if not detail.get("success")
+            ]
+            entry = {"success": success}
+            if success:
+                entry["message"] = "；".join(item for item in messages if item) or "上传成功"
+            else:
+                entry["error"] = "；".join(item for item in errors if item) or "上传失败"
+
+        if reason_codes:
+            entry["reason_codes"] = reason_codes
+            entry["reason_code"] = reason_codes[0]
+        if guard_messages:
+            entry["guard_message"] = "；".join(guard_messages)
+        if guard_blocked:
+            entry["guard_blocked"] = True
+        platform_uploads[platform_key] = entry
+
+    return platform_uploads
+
+
+def _build_source_account_summary(task: TeamInviteTask, team_account_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not task.source_account:
+        return None
+
+    summary = build_account_summary(task.source_account) or {}
+    included_in_upload = bool((task.upload_config or {}).get("include_source_account_upload"))
+    platform_uploads = _build_account_platform_uploads(
+        task.source_account_id,
+        (task.result or {}).get("upload"),
+    )
+
+    upload_status = "accepted"
+    if platform_uploads:
+        upload_status = "uploaded" if all(item.get("success") for item in platform_uploads.values()) else "failed"
+    elif included_in_upload and task.status == "uploading":
+        upload_status = "uploading"
+
+    summary.update(
+        {
+            "team_ready": _is_account_team_ready(task.source_account, team_account_id),
+            "included_in_upload": included_in_upload,
+            "platform_uploads": platform_uploads,
+            "upload_status": upload_status,
+        }
+    )
+    return summary
 
 
 def _member_can_resume(member: TeamInviteMember, team_account_id: Optional[str]) -> bool:
@@ -437,6 +566,7 @@ def build_team_invite_response(task: TeamInviteTask, runtime_status: Optional[Di
         for member in members
     ]
     recommended_actions = _build_task_recommended_actions(member_summaries)
+    source_account_summary = _build_source_account_summary(task, team_account_id)
     stats = {
         "total_members": len(members),
         "managed_members": sum(1 for item in members if item.account_id),
@@ -465,7 +595,7 @@ def build_team_invite_response(task: TeamInviteTask, runtime_status: Optional[Di
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "started_at": task.started_at.isoformat() if task.started_at else None,
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
-        "source_account": build_account_summary(task.source_account) if task.source_account else None,
+        "source_account": source_account_summary,
         "source_team_task_uuid": task.source_team_task.task_uuid if task.source_team_task else None,
         "members": member_summaries,
         "stats": stats,
@@ -520,6 +650,10 @@ class TeamInviteOrchestrator:
                 )
 
             self._push_runtime("正在校验成员 Team 空间并准备上传")
+            if self._should_upload_source_account(task) and source_account and source_account.id:
+                self._append_unique_account_id(managed_upload_ids, source_account.id)
+                self._log(f"已将主账号加入上传队列: {source_account.email}")
+
             self._validate_accounts_ready_for_team_upload(managed_upload_ids, team_account_id)
             self._set_task_status("uploading")
             upload_results = self._upload_selected_accounts(managed_upload_ids)
@@ -751,11 +885,22 @@ class TeamInviteOrchestrator:
         proxy = task.proxy
         team_account_id = str(task.team_account_id or "").strip()
         if team_account_id and not force_discovery:
-            return task, source_account, team_account_id, proxy
+            refreshed_source_account = self._refresh_source_account_team_context(
+                source_account.id,
+                team_account_id,
+                proxy,
+            )
+            refreshed_task = self._get_task() or task
+            return refreshed_task, refreshed_task.source_account or refreshed_source_account, team_account_id, proxy
 
         self._push_runtime("正在发现目标 Team")
         self._log("开始发现目标 Team")
         self._log(f"当前使用代理: {proxy or '直连'}")
+        if not source_account.access_token:
+            self._push_runtime("涓昏处鍙风己灏?access_token锛屽皾璇曞厛鑷姩琛ョ櫥")
+            source_account = self._ensure_source_account_access_before_discovery(source_account.id, proxy)
+            refreshed_task = self._get_task() or task
+            source_account = refreshed_task.source_account or source_account
         discovery = discover_team_account(source_account, proxy)
         if not discovery.get("success"):
             raise TeamInviteError(discovery.get("error") or "无法发现 team_account_id")
@@ -778,8 +923,151 @@ class TeamInviteOrchestrator:
                 }
             }
         )
+        refreshed_source_account = self._refresh_source_account_team_context(
+            source_account.id,
+            team_account_id,
+            proxy,
+        )
         refreshed_task = self._get_task() or task
-        return refreshed_task, source_account, team_account_id, proxy
+        return refreshed_task, refreshed_task.source_account or refreshed_source_account, team_account_id, proxy
+
+    @staticmethod
+    def _should_upload_source_account(task: Optional[TeamInviteTask]) -> bool:
+        if not task or not task.source_account_id:
+            return False
+        return bool((task.upload_config or {}).get("include_source_account_upload"))
+
+    def _ensure_source_account_access_before_discovery(
+        self,
+        account_id: int,
+        proxy: Optional[str],
+    ) -> Account:
+        with get_db() as db:
+            account = crud.get_account_by_id(db, account_id)
+            if not account:
+                raise TeamInviteError(f"主账号不存在: {account_id}")
+
+        recovery = recover_account_session_via_login(
+            account,
+            proxy_url=proxy,
+            callback_logger=self._log,
+        )
+        if not recovery.get("success"):
+            message = recovery.get("error") or f"主账号缺少 access_token，且无法自动补登: {account.email}"
+            raise TeamInviteError(message)
+
+        self._persist_recovered_account_session(account.id, recovery)
+        with get_db() as db:
+            refreshed_account = crud.get_account_by_id(db, account.id)
+            if not refreshed_account:
+                raise TeamInviteError(f"主账号不存在: {account_id}")
+        if not refreshed_account.access_token:
+            raise TeamInviteError(f"主账号自动补登后仍缺少 access_token: {refreshed_account.email}")
+
+        self._log(f"主账号自动补登成功，继续发现 Team: {refreshed_account.email}")
+        return refreshed_account
+
+    def _persist_recovered_account_session(self, account_id: int, recovery: Dict[str, Any]):
+        with get_db() as db:
+            fresh_account = crud.get_account_by_id(db, account_id)
+            if not fresh_account:
+                raise TeamInviteError(f"璐﹀彿涓嶅瓨鍦? {account_id}")
+            recovered_account_id = recovery.get("account_id")
+            if recovered_account_id:
+                fresh_account.account_id = recovered_account_id
+            crud.update_account(
+                db,
+                fresh_account.id,
+                access_token=recovery.get("access_token"),
+                refresh_token=recovery.get("refresh_token"),
+                id_token=recovery.get("id_token"),
+                session_token=recovery.get("session_token"),
+                cookies=recovery.get("cookies"),
+                email_service_id=recovery.get("email_service_id"),
+                workspace_id=recovery.get("workspace_id"),
+                source=recovery.get("source") or "login",
+                status="active",
+                last_refresh=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+
+    def _refresh_source_account_team_context(
+        self,
+        account_id: int,
+        team_account_id: str,
+        proxy: Optional[str],
+    ) -> Account:
+        with get_db() as db:
+            account = crud.get_account_by_id(db, account_id)
+            if not account:
+                raise TeamInviteError(f"涓昏处鍙蜂笉瀛樺湪: {account_id}")
+
+        if _is_account_team_ready(account, team_account_id):
+            return account
+
+        recovery = None
+        if not has_recoverable_account_session(account):
+            self._log(f"{account.email} 缂哄皯鍙敤浼氳瘽锛屾鍦ㄨ嚜鍔ㄨˉ鐧绘仮澶嶄富鍙?Team 浼氳瘽")
+            recovery = recover_account_session_via_login(
+                account,
+                proxy_url=proxy,
+                callback_logger=self._log,
+                target_workspace_id=team_account_id,
+            )
+            if not recovery.get("success"):
+                message = recovery.get("error") or f"涓昏处鍙疯嚜鍔ㄨˉ鐧诲け璐? {account.email}"
+                raise TeamInviteError(message)
+            self._persist_recovered_account_session(account.id, recovery)
+            with get_db() as db:
+                account = crud.get_account_by_id(db, account.id)
+                if not account:
+                    raise TeamInviteError(f"涓昏处鍙蜂笉瀛樺湪: {account_id}")
+
+        updates: Dict[str, Any] = {
+            "workspace_id": team_account_id,
+            "subscription_type": "team",
+            "subscription_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+        consent_has_team_token = recovery is not None and recovery.get("access_token") and not recovery.get("session_token")
+        if consent_has_team_token:
+            updates.update(
+                {
+                    "account_id": recovery.get("account_id") or team_account_id,
+                    "access_token": recovery.get("access_token"),
+                    "session_token": "",
+                    "last_refresh": datetime.utcnow(),
+                }
+            )
+        elif account.session_token:
+            refresh_result = refresh_member_team_token(account, team_account_id, proxy)
+            if not refresh_result.get("success"):
+                raise TeamInviteError(refresh_result.get("error") or f"鍒锋柊涓昏处鍙?Team token 澶辫触: {account.email}")
+            updates.update(
+                {
+                    "account_id": refresh_result.get("account_id") or team_account_id,
+                    "access_token": refresh_result.get("access_token"),
+                    "session_token": refresh_result.get("session_token"),
+                    "expires_at": refresh_result.get("expires_at"),
+                    "last_refresh": datetime.utcnow(),
+                }
+            )
+        else:
+            updates["account_id"] = team_account_id
+
+        with get_db() as db:
+            fresh_account = crud.get_account_by_id(db, account.id)
+            if not fresh_account:
+                raise TeamInviteError(f"涓昏处鍙蜂笉瀛樺湪: {account_id}")
+            refreshed_account_id = updates.pop("account_id", None)
+            if refreshed_account_id:
+                fresh_account.account_id = refreshed_account_id
+            crud.update_account(db, fresh_account.id, **updates)
+            db.refresh(fresh_account)
+            refreshed_account = fresh_account
+
+        self._log(f"宸插悓姝ヤ富鍙?Team 韬唤: {refreshed_account.email}")
+        return refreshed_account
 
     def _process_member_for_workflow(
         self,
@@ -1120,6 +1408,7 @@ class TeamInviteOrchestrator:
                 "team_account_id": task.team_account_id,
                 "team_workspace_id": task.team_workspace_id,
                 "source_account_id": task.source_account_id,
+                "include_source_account_upload": bool(upload_config.get("include_source_account_upload")),
                 "members": [
                     {
                         "team_invite_member_id": member.id,

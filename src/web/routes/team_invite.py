@@ -22,7 +22,7 @@ from ...core.upload.sub2api_naming import (
 )
 from ...core.upload.sub2api_payload import format_sub2api_name, normalize_sub2api_template_config
 from ...database import crud
-from ...database.models import Account, Sub2ApiService, TeamInviteTask, TeamTask
+from ...database.models import Account, EmailService, Sub2ApiService, TeamInviteTask, TeamTask
 from ...database.session import get_db
 from ...web.task_manager import task_manager
 from .registration import get_proxy_for_registration
@@ -31,16 +31,20 @@ router = APIRouter()
 
 RUNNING_INVITE_STATUSES = {"verifying", "inviting", "accepting", "uploading"}
 CANCELLABLE_INVITE_STATUSES = RUNNING_INVITE_STATUSES | {"pending"}
+CUSTOM_DOMAIN_SOURCE_SERVICE_TYPES = ("moe_mail", "temp_mail", "duck_mail", "freemail")
 
 
 class TeamInviteCreateRequest(BaseModel):
     source_mode: str
     source_account_id: Optional[int] = None
     source_team_task_uuid: Optional[str] = None
+    custom_source_email: Optional[str] = None
+    custom_source_service_type: Optional[str] = None
     existing_account_ids: List[int] = Field(default_factory=list)
     team_source_task_uuids: List[str] = Field(default_factory=list)
     manual_emails: List[str] = Field(default_factory=list)
     proxy: Optional[str] = None
+    include_source_account_upload: bool = False
     auto_upload_sub2api: bool = False
     sub2api_service_ids: List[int] = Field(default_factory=list)
     sub2api_group_ids_by_service: Dict[str, List[int]] = Field(default_factory=dict)
@@ -82,6 +86,7 @@ class TeamInviteTaskResponse(BaseModel):
 
 class TeamInviteRuntimeConfigRequest(BaseModel):
     proxy: Optional[str] = None
+    include_source_account_upload: Optional[bool] = None
     auto_upload_sub2api: Optional[bool] = None
     sub2api_service_ids: Optional[List[int]] = None
     sub2api_group_ids_by_service: Optional[Dict[str, List[int]]] = None
@@ -138,6 +143,7 @@ class TeamInviteLogsResponse(BaseModel):
 class TeamInviteSourceAccountResponse(BaseModel):
     id: int
     email: str
+    email_service: Optional[str] = None
     remark: Optional[str] = None
     status: str
     source: Optional[str] = None
@@ -164,6 +170,7 @@ class TeamInviteSourcesResponse(BaseModel):
     source_accounts: List[TeamInviteSourceAccountResponse] = Field(default_factory=list)
     accounts: List[TeamInviteSourceAccountResponse] = Field(default_factory=list)
     team_tasks: List[TeamInviteSourceTaskResponse] = Field(default_factory=list)
+    custom_source_service_types: List[str] = Field(default_factory=list)
 
 
 def _load_sub2api_group_name(service: Sub2ApiService, group_id: int) -> str:
@@ -245,12 +252,80 @@ def _parse_manual_emails(values: List[str]) -> List[str]:
     return emails
 
 
+def _is_valid_email(value: Optional[str]) -> bool:
+    candidate = str(value or "").strip().lower()
+    return bool(candidate and re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", candidate))
+
+
+def _extract_email_domain(email: Optional[str]) -> str:
+    _, _, domain = str(email or "").strip().lower().partition("@")
+    return domain.strip()
+
+
+def _extract_email_service_domain(service: EmailService) -> str:
+    config = service.config or {}
+    return str(config.get("default_domain") or config.get("domain") or "").strip().lstrip("@").lower()
+
+
+def _load_enabled_custom_source_service_types(db) -> List[str]:
+    rows = (
+        db.query(EmailService.service_type)
+        .filter(
+            EmailService.enabled.is_(True),
+            EmailService.service_type.in_(CUSTOM_DOMAIN_SOURCE_SERVICE_TYPES),
+        )
+        .distinct()
+        .all()
+    )
+    enabled_types = {str(row[0] or "").strip() for row in rows if row and row[0]}
+    return [service_type for service_type in CUSTOM_DOMAIN_SOURCE_SERVICE_TYPES if service_type in enabled_types]
+
+
+def _resolve_custom_source_account(db, email: Optional[str], service_type: Optional[str]) -> Account:
+    normalized_email = str(email or "").strip().lower()
+    normalized_service_type = str(service_type or "").strip().lower()
+    if not _is_valid_email(normalized_email):
+        raise HTTPException(status_code=400, detail="custom_source_email 格式无效")
+    if normalized_service_type not in CUSTOM_DOMAIN_SOURCE_SERVICE_TYPES:
+        raise HTTPException(status_code=400, detail="custom_source_service_type 不支持当前类型")
+
+    target_domain = _extract_email_domain(normalized_email)
+    services = (
+        db.query(EmailService)
+        .filter(
+            EmailService.enabled.is_(True),
+            EmailService.service_type == normalized_service_type,
+        )
+        .order_by(EmailService.priority.asc(), EmailService.id.asc())
+        .all()
+    )
+    matched_service = next(
+        (service for service in services if _extract_email_service_domain(service) == target_domain),
+        None,
+    )
+    if not matched_service:
+        raise HTTPException(status_code=400, detail="未找到匹配该邮箱域名的已启用邮箱服务")
+
+    account = (
+        db.query(Account)
+        .filter(func.lower(Account.email) == normalized_email)
+        .order_by(Account.created_at.desc(), Account.id.desc())
+        .first()
+    )
+    if not account:
+        raise HTTPException(status_code=400, detail="该自定义主号邮箱尚未存在于账号管理中")
+    if str(account.email_service or "").strip().lower() != normalized_service_type:
+        raise HTTPException(status_code=400, detail="该邮箱已存在本地账号，但邮箱服务类型与当前选择不一致")
+    return account
+
+
 def _build_upload_config(
     request: TeamInviteCreateRequest | TeamInviteRuntimeConfigRequest,
     current_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     config = dict(current_config or {})
     for key in (
+        "include_source_account_upload",
         "auto_upload_sub2api",
         "sub2api_service_ids",
         "sub2api_group_ids_by_service",
@@ -264,6 +339,7 @@ def _build_upload_config(
         if value is not None:
             config[key] = value
 
+    config.setdefault("include_source_account_upload", False)
     config.setdefault("auto_upload_sub2api", False)
     config.setdefault("sub2api_service_ids", [])
     config.setdefault("sub2api_group_ids_by_service", {})
@@ -335,6 +411,7 @@ def _serialize_source_account(
     return TeamInviteSourceAccountResponse(
         id=account.id,
         email=account.email,
+        email_service=account.email_service,
         remark=account.remark,
         status=account.status,
         source=account.source,
@@ -363,6 +440,7 @@ def _serialize_source_team_task(task: TeamTask) -> TeamInviteSourceTaskResponse:
         main_account = {
             "id": task.main_account.id,
             "email": task.main_account.email,
+            "email_service": task.main_account.email_service,
             "remark": task.main_account.remark,
             "account_id": task.main_account.account_id,
             "workspace_id": task.main_account.workspace_id,
@@ -482,13 +560,14 @@ async def get_team_invite_sources(
             source_accounts=source_accounts,
             accounts=[_serialize_source_account(account) for account in accounts],
             team_tasks=[_serialize_source_team_task(task) for task in team_tasks],
+            custom_source_service_types=_load_enabled_custom_source_service_types(db),
         )
 
 
 @router.post("/create", response_model=TeamInviteTaskResponse)
 async def create_team_invite_task(request: TeamInviteCreateRequest, background_tasks: BackgroundTasks):
     with get_db() as db:
-        if request.source_mode not in {"account", "team_task"}:
+        if request.source_mode not in {"account", "team_task", "custom_domain_email"}:
             raise HTTPException(status_code=400, detail="source_mode 必须是 account 或 team_task")
 
         source_team_task = None
@@ -499,7 +578,7 @@ async def create_team_invite_task(request: TeamInviteCreateRequest, background_t
             if not source_account:
                 raise HTTPException(status_code=404, detail="主账号不存在")
             source_team_task = _resolve_source_team_task_for_account(db, source_account)
-        else:
+        elif request.source_mode == "team_task":
             if not request.source_team_task_uuid:
                 raise HTTPException(status_code=400, detail="source_team_task_uuid 不能为空")
             source_team_task = crud.get_team_task(db, request.source_team_task_uuid)
@@ -508,6 +587,14 @@ async def create_team_invite_task(request: TeamInviteCreateRequest, background_t
             source_account = crud.get_account_by_id(db, source_team_task.main_account_id)
             if not source_account:
                 raise HTTPException(status_code=404, detail="源 Team 主账号不存在")
+
+        else:
+            source_account = _resolve_custom_source_account(
+                db,
+                request.custom_source_email,
+                request.custom_source_service_type,
+            )
+            source_team_task = _resolve_source_team_task_for_account(db, source_account)
 
         excluded_email = (source_account.email or "").lower()
         upload_config = _build_upload_config(request)

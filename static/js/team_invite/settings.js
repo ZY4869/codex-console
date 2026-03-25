@@ -50,6 +50,7 @@
 
     function buildSelectedPlatforms() {
         const sub2apiGroups = getSelectedSub2ApiGroups();
+        const includeSourceAccount = Boolean(elements.uploadSourceAccount?.checked);
         return [
             {
                 key: 'sub2api',
@@ -57,18 +58,21 @@
                 enabled: elements.uploadSub2api.checked,
                 service_ids: app.getSelectedIds(elements.sub2apiServiceIds),
                 group_ids_by_service: sub2apiGroups,
+                include_source_account: includeSourceAccount,
             },
             {
                 key: 'cpa',
                 label: 'CPA',
                 enabled: elements.uploadCpa.checked,
                 service_ids: app.getSelectedIds(elements.cpaServiceIds),
+                include_source_account: includeSourceAccount,
             },
             {
                 key: 'tm',
                 label: 'Team Manager',
                 enabled: elements.uploadTm.checked,
                 service_ids: app.getSelectedIds(elements.tmServiceIds),
+                include_source_account: includeSourceAccount,
             },
         ];
     }
@@ -94,6 +98,17 @@
             elements.sourceSummary.innerHTML = `
                 <h5>${app.escapeHtml(sourceAccount.email)}</h5>
                 <p>当前主账号已选择，但本地暂未找到对应 Team 任务记录。仍然可以继续补充自定义账号与手填邮箱。</p>
+            `;
+            return;
+        }
+
+        if (!sourceTask) {
+            elements.sourceSummary.innerHTML = `
+                <h5>${app.escapeHtml(sourceAccount.email)}</h5>
+                <p>
+                    当前主账号已选中，来源服务：${app.escapeHtml(app.formatEmailServiceType(sourceAccount.email_service))}。<br>
+                    本地暂未找到对应 Team 任务记录，你仍然可以继续补充自定义账号与手填邮箱。
+                </p>
             `;
             return;
         }
@@ -157,6 +172,157 @@
             (account) => ({
                 value: String(account.id),
                 label: `${account.email}${account.remark ? ` (${account.remark})` : ''}`,
+            }),
+            {
+                emptyLabel: selectedSourceAccount ? '暂无可补位账号' : '先选择主账号',
+                selectedValues: selectedAccountIds || [],
+            },
+        );
+    }
+
+    function buildAccountOptionLabel(account, workspaceName = '') {
+        const serviceLabel = app.formatEmailServiceType(account?.email_service);
+        const remark = account?.remark ? ` (${account.remark})` : '';
+        const workspace = workspaceName ? ` | ${workspaceName}` : '';
+        return `${account?.email || '-'} · ${serviceLabel}${remark}${workspace}`;
+    }
+
+    function renderCustomSourceServiceTypes(selectedType) {
+        const serviceTypes = (state.sources.customSourceServiceTypes || []).map((value) => ({
+            value,
+            label: app.formatEmailServiceType(value),
+        }));
+        app.fillSelect(
+            elements.customSourceServiceType,
+            serviceTypes,
+            (serviceType) => ({
+                value: serviceType.value,
+                label: serviceType.label,
+            }),
+            {
+                emptyLabel: '暂无可用类型',
+                selectedValues: selectedType ? [selectedType] : [],
+            },
+        );
+    }
+
+    function renderSourceMode() {
+        const isCustomMode = app.getSelectedSourceMode() === 'custom_domain_email';
+        elements.sourceAccountWrap.hidden = isCustomMode;
+        elements.customSourceWrap.hidden = !isCustomMode;
+        elements.sourceAccountCount.textContent = isCustomMode
+            ? `${(state.sources.customSourceServiceTypes || []).length} 种可用类型`
+            : `${state.sources.sourceAccounts.length} 个可用主号`;
+    }
+
+    function renderSourceSummary() {
+        const sourceMode = app.getSelectedSourceMode();
+        const sourceAccount = app.getSelectedSourceAccount();
+        const sourceTask = app.getSelectedSourceTask();
+        const customSelection = app.getCustomSourceSelection();
+
+        if (sourceMode === 'custom_domain_email') {
+            if (!customSelection.email) {
+                elements.sourceSummary.innerHTML = `
+                    <h5>自定义主号</h5>
+                    <p>输入自定义域名邮箱并选择邮箱服务类型后，这里会显示本地账号匹配结果。</p>
+                `;
+                return;
+            }
+            if (!customSelection.serviceType) {
+                elements.sourceSummary.innerHTML = `
+                    <h5>${app.escapeHtml(customSelection.email)}</h5>
+                    <p>还没有选择邮箱服务类型。请选择一个已启用的自定义域名邮箱类型后继续匹配。</p>
+                `;
+                return;
+            }
+            if (!sourceAccount) {
+                const conflictingAccount = customSelection.conflictingAccount;
+                elements.sourceSummary.innerHTML = `
+                    <h5>${app.escapeHtml(customSelection.email)}</h5>
+                    <p>
+                        ${conflictingAccount
+                            ? `本地已找到邮箱相同的账号，但其来源服务是 ${app.escapeHtml(app.formatEmailServiceType(conflictingAccount.email_service))}，与当前选择的 ${app.escapeHtml(app.formatEmailServiceType(customSelection.serviceType))} 不一致。`
+                            : '当前还没有匹配到可用的本地账号。请先把这个邮箱对应的账号准备到账号管理中。'}
+                    </p>
+                `;
+                return;
+            }
+            if (!sourceTask) {
+                elements.sourceSummary.innerHTML = `
+                    <h5>${app.escapeHtml(sourceAccount.email)}</h5>
+                    <p>
+                        已匹配到本地账号，来源服务：${app.escapeHtml(app.formatEmailServiceType(sourceAccount.email_service))}。<br>
+                        当前还没有找到对应 Team 任务记录，你仍然可以继续补充自定义账号或手填邮箱来发起邀请。
+                    </p>
+                `;
+                return;
+            }
+        } else if (!sourceAccount) {
+            elements.sourceSummary.innerHTML = `
+                <h5>当前 Team</h5>
+                <p>选择主账号后，这里会展示对应的 Team 摘要。</p>
+            `;
+            return;
+        }
+
+        const teamMembers = getSourceTaskMembers(sourceTask);
+        elements.sourceSummary.innerHTML = `
+            <h5>${app.escapeHtml(sourceTask.workspace_name || 'MyTeam')}</h5>
+            <p>
+                主账号：${app.escapeHtml(sourceTask.main_account?.email || sourceAccount.email)} (${app.escapeHtml(app.formatEmailServiceType(sourceTask.main_account?.email_service || sourceAccount.email_service))})<br>
+                Team：${app.escapeHtml(sourceTask.team_account_id || '运行时自动发现')}<br>
+                代理：${app.escapeHtml(sourceTask.proxy || '留空自动回退')}<br>
+                当前团队：${sourceTask.member_count || 0} 人，其中默认邀请 ${teamMembers.length} 人
+            </p>
+        `;
+    }
+
+    function renderSourceAccounts(selectedSourceAccountId) {
+        app.fillSelect(
+            elements.sourceAccountId,
+            state.sources.sourceAccounts,
+            (account) => {
+                const task = app.findSourceTaskByAccountId(account.id);
+                return {
+                    value: String(account.id),
+                    label: buildAccountOptionLabel(account, task?.workspace_name || ''),
+                };
+            },
+            {
+                emptyLabel: '暂无可用 Team 主账号',
+                selectedValues: selectedSourceAccountId ? [selectedSourceAccountId] : [],
+            },
+        );
+    }
+
+    function renderExistingAccounts(selectedAccountIds) {
+        const selectedSourceAccount = app.getSelectedSourceAccount();
+        const sourceTask = app.getSelectedSourceTask();
+        const excludedIds = new Set();
+        const excludedEmails = new Set();
+
+        if (selectedSourceAccount) {
+            excludedIds.add(String(selectedSourceAccount.id));
+            excludedEmails.add(String(selectedSourceAccount.email || '').toLowerCase());
+        }
+
+        (sourceTask?.members || []).forEach((member) => {
+            excludedIds.add(String(member.id));
+            excludedEmails.add(String(member.email || '').toLowerCase());
+        });
+
+        const availableAccounts = state.sources.accounts.filter((account) => {
+            const email = String(account.email || '').toLowerCase();
+            return !excludedIds.has(String(account.id)) && !excludedEmails.has(email);
+        });
+
+        app.fillSelect(
+            elements.existingAccountIds,
+            availableAccounts,
+            (account) => ({
+                value: String(account.id),
+                label: buildAccountOptionLabel(account),
             }),
             {
                 emptyLabel: selectedSourceAccount ? '暂无可补位账号' : '先选择主账号',
@@ -534,6 +700,7 @@
         elements.taskProxy.value = task.proxy || '';
         elements.retryLimit.value = String(task.retry_limit ?? task.upload_config?.retry_limit ?? 0);
 
+        elements.uploadSourceAccount.checked = Boolean(task.upload_config?.include_source_account_upload);
         elements.uploadSub2api.checked = Boolean(task.upload_config?.auto_upload_sub2api);
         elements.uploadCpa.checked = Boolean(task.upload_config?.auto_upload_cpa);
         elements.uploadTm.checked = Boolean(task.upload_config?.auto_upload_tm);
@@ -579,6 +746,7 @@
         const retryLimit = Math.max(0, Math.min(10, app.parseInteger(elements.retryLimit.value, 0)));
         return {
             proxy: elements.taskProxy.value.trim() || null,
+            include_source_account_upload: Boolean(elements.uploadSourceAccount?.checked),
             auto_upload_sub2api: elements.uploadSub2api.checked,
             sub2api_service_ids: app.getSelectedIds(elements.sub2apiServiceIds),
             sub2api_group_ids_by_service: getSelectedSub2ApiGroups(),
@@ -599,6 +767,7 @@
         const seenEmails = new Set();
 
         if (sourceAccount) {
+            const includeSourceAccount = Boolean(elements.uploadSourceAccount?.checked);
             rows.push({
                 key: app.buildMemberKey('main', sourceAccount.id, sourceAccount.email),
                 kind: 'main_account',
@@ -609,8 +778,11 @@
                 sourceLabel: 'Team 主账号',
                 invitationStatus: 'accepted',
                 teamReady: true,
-                note: sourceTask?.team_account_id ? `当前 Team：${sourceTask.team_account_id}` : '运行时自动发现 Team',
+                note: includeSourceAccount
+                    ? '开始任务后会先同步主号 Team 身份，再跟成员一起上传到已选平台。'
+                    : (sourceTask?.team_account_id ? `当前 Team：${sourceTask.team_account_id}` : '运行时自动发现 Team'),
                 actionFlags: {},
+                includedInUpload: includeSourceAccount,
                 account: sourceTask?.main_account || sourceAccount,
                 raw: sourceTask?.main_account || sourceAccount,
             });
@@ -691,6 +863,7 @@
 
         const teamMemberCount = getSourceTaskMembers(sourceTask).length;
         const customMemberCount = customAccounts.length + manualEmails.length;
+        const includeSourceAccount = Boolean(elements.uploadSourceAccount?.checked);
         return {
             task_uuid: null,
             status: 'preview',
@@ -702,7 +875,7 @@
             members: rows,
             selected_platforms: buildSelectedPlatforms(),
             note: sourceAccount
-                ? `默认邀请 ${teamMemberCount} 个源 Team 成员，当前额外补位 ${customMemberCount} 个账号。`
+                ? `默认邀请 ${teamMemberCount} 个源 Team 成员，当前额外补位 ${customMemberCount} 个账号。${includeSourceAccount ? ' 主号会一起上传。' : ''}`
                 : '先选择一个可用的 Team 主账号。',
         };
     }
@@ -722,6 +895,319 @@
             notifyPreviewChanged(false);
         }, 200));
 
+        elements.uploadSourceAccount?.addEventListener('change', () => {
+            notifyPreviewChanged(false);
+        });
+        elements.uploadSub2api.addEventListener('change', async () => {
+            syncPlatformBodies();
+            await renderSub2ApiGroups();
+            if (app.taskView) app.taskView.render();
+        });
+        elements.uploadCpa.addEventListener('change', () => {
+            syncPlatformBodies();
+            if (app.taskView) app.taskView.render();
+        });
+        elements.uploadTm.addEventListener('change', () => {
+            syncPlatformBodies();
+            if (app.taskView) app.taskView.render();
+        });
+        elements.sub2apiServiceIds.addEventListener('change', async () => {
+            await renderSub2ApiGroups();
+            if (app.taskView) app.taskView.render();
+        });
+        elements.cpaServiceIds.addEventListener('change', () => app.taskView?.render());
+        elements.tmServiceIds.addEventListener('change', () => app.taskView?.render());
+
+        elements.sub2apiGroups.addEventListener('change', async (event) => {
+            const checkbox = event.target.closest('[data-sub2api-group]');
+            if (!checkbox) {
+                return;
+            }
+            const serviceId = String(checkbox.dataset.serviceId);
+            const groupId = app.parseInteger(checkbox.value);
+            const selected = new Set((state.sub2apiGroupSelections[serviceId] || []).map((value) => String(value)));
+            if (checkbox.checked) {
+                selected.add(String(groupId));
+            } else {
+                selected.delete(String(groupId));
+            }
+            state.sub2apiGroupSelections[serviceId] = Array.from(selected).map((value) => app.parseInteger(value)).filter(Boolean);
+            await renderSub2ApiNamePreviews();
+            if (app.taskView) app.taskView.render();
+        });
+
+        elements.retryLimit.addEventListener('change', () => {
+            elements.retryLimit.value = String(Math.max(0, Math.min(10, app.parseInteger(elements.retryLimit.value, 0))));
+        });
+        elements.registerAccountBtn.addEventListener('click', handleQuickRegistration);
+    }
+
+    async function loadSources(options = {}) {
+        const selectedSourceAccountId = options.selectedSourceAccountId || elements.sourceAccountId.value;
+        const selectedAccountIds = options.selectedAccountIds || app.getSelectedValues(elements.existingAccountIds);
+        const selectedCustomSourceType = options.selectedCustomSourceType || elements.customSourceServiceType.value;
+
+        const response = await app.api.loadSources();
+        state.sources.accounts = Array.isArray(response.accounts) ? response.accounts : [];
+        state.sources.sourceAccounts = Array.isArray(response.source_accounts) ? response.source_accounts : [];
+        state.sources.teamTasks = Array.isArray(response.team_tasks) ? response.team_tasks : [];
+        state.sources.customSourceServiceTypes = Array.isArray(response.custom_source_service_types)
+            ? response.custom_source_service_types
+            : [];
+
+        renderCustomSourceServiceTypes(selectedCustomSourceType);
+        renderSourceMode();
+        renderSourceAccounts(selectedSourceAccountId);
+        renderSourceSummary();
+        renderExistingAccounts(selectedAccountIds);
+        updateCustomSummary();
+        updateCapacityWarning();
+    }
+
+    async function hydrateFromTask(task) {
+        if (!task) return;
+
+        const sourceMode = task.source_mode === 'custom_domain_email' ? 'custom_domain_email' : 'account';
+        const sourceAccountId = String(task.source_account?.id || '');
+        const customSourceEmail = sourceMode === 'custom_domain_email' ? String(task.source_account?.email || '') : '';
+        const customSourceServiceType = sourceMode === 'custom_domain_email'
+            ? String(task.source_account?.email_service || '')
+            : elements.customSourceServiceType.value;
+
+        elements.sourceMode.value = sourceMode;
+        elements.customSourceEmail.value = customSourceEmail;
+        renderCustomSourceServiceTypes(customSourceServiceType);
+        elements.customSourceServiceType.value = customSourceServiceType;
+        renderSourceMode();
+        renderSourceAccounts(sourceAccountId);
+        elements.sourceAccountId.value = sourceMode === 'account' ? sourceAccountId : '';
+        renderSourceSummary();
+
+        const selectedCustomIds = (task.members || [])
+            .filter((member) => member.source_type === 'account' && member.account_id)
+            .map((member) => String(member.account_id));
+        renderExistingAccounts(selectedCustomIds);
+
+        elements.manualEmails.value = (task.members || [])
+            .filter((member) => member.source_type === 'manual')
+            .map((member) => member.email)
+            .join('\n');
+
+        elements.taskProxy.value = task.proxy || '';
+        elements.retryLimit.value = String(task.retry_limit ?? task.upload_config?.retry_limit ?? 0);
+
+        elements.uploadSourceAccount.checked = Boolean(task.upload_config?.include_source_account_upload);
+        elements.uploadSub2api.checked = Boolean(task.upload_config?.auto_upload_sub2api);
+        elements.uploadCpa.checked = Boolean(task.upload_config?.auto_upload_cpa);
+        elements.uploadTm.checked = Boolean(task.upload_config?.auto_upload_tm);
+        syncPlatformBodies();
+
+        renderUploadServiceSelect(
+            elements.sub2apiServiceIds,
+            state.uploadServices.sub2api,
+            (task.upload_config?.sub2api_service_ids || []).map(String),
+            '鏆傛棤鍙敤鏈嶅姟',
+        );
+        renderUploadServiceSelect(
+            elements.cpaServiceIds,
+            state.uploadServices.cpa,
+            (task.upload_config?.cpa_service_ids || []).map(String),
+            '鏆傛棤鍙敤鏈嶅姟',
+        );
+        renderUploadServiceSelect(
+            elements.tmServiceIds,
+            state.uploadServices.tm,
+            (task.upload_config?.tm_service_ids || []).map(String),
+            '鏆傛棤鍙敤鏈嶅姟',
+        );
+        state.sub2apiGroupSelections = { ...(task.upload_config?.sub2api_group_ids_by_service || {}) };
+        await renderSub2ApiGroups();
+        updateCustomSummary();
+        updateCapacityWarning();
+    }
+
+    function buildCreatePayload() {
+        const sourceMode = app.getSelectedSourceMode();
+        const sourceAccountId = app.parseInteger(elements.sourceAccountId.value, 0);
+        const customSelection = app.getCustomSourceSelection();
+        return {
+            source_mode: sourceMode,
+            source_account_id: sourceMode === 'account' ? (sourceAccountId || null) : null,
+            custom_source_email: sourceMode === 'custom_domain_email' ? (customSelection.email || null) : null,
+            custom_source_service_type: sourceMode === 'custom_domain_email' ? (customSelection.serviceType || null) : null,
+            existing_account_ids: app.getSelectedIds(elements.existingAccountIds),
+            team_source_task_uuids: [],
+            manual_emails: getSelectedManualEmails(),
+            ...buildRuntimeConfig(),
+        };
+    }
+
+    function getPreviewSnapshot() {
+        const sourceMode = app.getSelectedSourceMode();
+        const sourceAccount = app.getSelectedSourceAccount();
+        const sourceTask = app.getSelectedSourceTask();
+        const customSelection = app.getCustomSourceSelection();
+        const customAccounts = getSelectedCustomAccounts();
+        const manualEmails = getSelectedManualEmails();
+        const rows = [];
+        const seenEmails = new Set();
+        const mainSourceLabel = sourceMode === 'custom_domain_email'
+            ? `自定义主号 · ${app.formatEmailServiceType(sourceAccount?.email_service || customSelection.serviceType)}`
+            : 'Team 主账号';
+
+        if (sourceAccount) {
+            const includeSourceAccount = Boolean(elements.uploadSourceAccount?.checked);
+            rows.push({
+                key: app.buildMemberKey('main', sourceAccount.id, sourceAccount.email),
+                kind: 'main_account',
+                memberId: null,
+                accountId: sourceAccount.id,
+                email: sourceAccount.email,
+                roleLabel: '主账号',
+                sourceLabel: mainSourceLabel,
+                invitationStatus: 'accepted',
+                teamReady: true,
+                note: includeSourceAccount
+                    ? '开始任务后会先同步主号 Team 身份，再跟成员一起上传到已选平台。'
+                    : (sourceTask?.team_account_id ? `当前 Team：${sourceTask.team_account_id}` : '运行时自动发现 Team'),
+                actionFlags: {},
+                includedInUpload: includeSourceAccount,
+                account: sourceTask?.main_account || sourceAccount,
+                raw: sourceTask?.main_account || sourceAccount,
+            });
+            seenEmails.add(String(sourceAccount.email || '').toLowerCase());
+        }
+
+        getSourceTaskMembers(sourceTask).forEach((member) => {
+            const email = String(member.email || '').toLowerCase();
+            if (!email || seenEmails.has(email)) {
+                return;
+            }
+            seenEmails.add(email);
+            rows.push({
+                key: app.buildMemberKey('preview-member', member.id, member.email),
+                kind: 'member',
+                memberId: null,
+                accountId: member.id,
+                email: member.email,
+                roleLabel: '成员',
+                sourceLabel: '源 Team 成员',
+                invitationStatus: 'pending',
+                teamReady: false,
+                note: `默认跟随主账号一起邀请${member.team_role ? ` · ${member.team_role}` : ''}`,
+                actionFlags: {},
+                account: member,
+                raw: member,
+                sourceType: 'team_task',
+            });
+        });
+
+        customAccounts.forEach((account) => {
+            const email = String(account.email || '').toLowerCase();
+            if (!email || seenEmails.has(email)) {
+                return;
+            }
+            seenEmails.add(email);
+            rows.push({
+                key: app.buildMemberKey('preview-custom', account.id, account.email),
+                kind: 'member',
+                memberId: null,
+                accountId: account.id,
+                email: account.email,
+                roleLabel: '成员',
+                sourceLabel: `自定义账号 · ${app.formatEmailServiceType(account.email_service)}`,
+                invitationStatus: 'pending',
+                teamReady: false,
+                note: '会在开始任务时一并加入 Team 邀请队列。',
+                actionFlags: {},
+                account,
+                raw: account,
+                sourceType: 'account',
+            });
+        });
+
+        manualEmails.forEach((email) => {
+            const normalized = String(email || '').toLowerCase();
+            if (!normalized || seenEmails.has(normalized)) {
+                return;
+            }
+            seenEmails.add(normalized);
+            rows.push({
+                key: app.buildMemberKey('preview-manual', null, normalized),
+                kind: 'manual',
+                memberId: null,
+                accountId: null,
+                email: normalized,
+                roleLabel: 'Invite-only',
+                sourceLabel: '手填邮箱',
+                invitationStatus: 'invite_only',
+                teamReady: false,
+                note: '仅发送邀请，不参与账号详情和成员上传。',
+                actionFlags: {},
+                account: null,
+                raw: { email: normalized },
+                sourceType: 'manual',
+            });
+        });
+
+        const teamMemberCount = getSourceTaskMembers(sourceTask).length;
+        const customMemberCount = customAccounts.length + manualEmails.length;
+        const includeSourceAccount = Boolean(elements.uploadSourceAccount?.checked);
+        const missingSourceNote = sourceMode === 'custom_domain_email'
+            ? '先输入自定义域名邮箱并匹配到已有本地账号。'
+            : '先选择一个可用的 Team 主账号。';
+        return {
+            task_uuid: null,
+            status: 'preview',
+            source_mode: sourceMode,
+            source_account: sourceTask?.main_account || sourceAccount,
+            team_account_id: sourceTask?.team_account_id || null,
+            source_team_task_uuid: sourceTask?.task_uuid || null,
+            team_member_count: teamMemberCount,
+            custom_member_count: customMemberCount,
+            members: rows,
+            selected_platforms: buildSelectedPlatforms(),
+            note: sourceAccount
+                ? `默认邀请 ${teamMemberCount} 个源 Team 成员，当前额外补位 ${customMemberCount} 个账号。${includeSourceAccount ? ' 主号会一起上传。' : ''}`
+                : missingSourceNote,
+        };
+    }
+
+    function bindEvents() {
+        const refreshSourceSelection = (forcePreview) => {
+            renderSourceMode();
+            renderSourceSummary();
+            renderExistingAccounts(app.getSelectedValues(elements.existingAccountIds));
+            notifyPreviewChanged(forcePreview);
+        };
+
+        elements.sourceMode.addEventListener('change', () => {
+            refreshSourceSelection(true);
+        });
+
+        elements.sourceAccountId.addEventListener('change', () => {
+            refreshSourceSelection(true);
+        });
+
+        elements.customSourceEmail.addEventListener('input', window.debounce(() => {
+            refreshSourceSelection(true);
+        }, 200));
+
+        elements.customSourceServiceType.addEventListener('change', () => {
+            refreshSourceSelection(true);
+        });
+
+        elements.existingAccountIds.addEventListener('change', () => {
+            notifyPreviewChanged(false);
+        });
+
+        elements.manualEmails.addEventListener('input', window.debounce(() => {
+            notifyPreviewChanged(false);
+        }, 200));
+
+        elements.uploadSourceAccount?.addEventListener('change', () => {
+            notifyPreviewChanged(false);
+        });
         elements.uploadSub2api.addEventListener('change', async () => {
             syncPlatformBodies();
             await renderSub2ApiGroups();

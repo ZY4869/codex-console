@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grok注册 - OpenAI 注册系统</title>
+    <link rel="stylesheet" href="/static/css/style.css?v={{ static_version }}">
+    <link rel="stylesheet" href="/static/css/grok_register.css?v={{ static_version }}">
+</head>
+<body class="grok-register-page">
+    <div class="container">
+        <nav class="navbar">
+            <div class="nav-brand">
+                <h1>OpenAI 注册系统</h1>
+            </div>
+            <div class="nav-links">
+                <a href="/" class="nav-link">注册</a>
+                <a href="/accounts" class="nav-link">账号管理</a>
+                <a href="/email-services" class="nav-link">邮箱服务</a>
+                <a href="/payment" class="nav-link">支付</a>
+                <a href="/team" class="nav-link">Team 创建</a>
+                <a href="/team/invite" class="nav-link">Team 邀请</a>
+                <a href="/grok" class="nav-link active">Grok注册</a>
+                <a href="/settings" class="nav-link">设置</a>
+                <a href="/logout" class="nav-link">退出</a>
+            </div>
+            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">主题</button>
+        </nav>
+
+        <main class="main-content">
+            <section class="grok-hero">
+                <div>
+                    <h2>Grok Register Console</h2>
+                    <p>统一配置默认值、启动任务、查看账号进度和实时日志。</p>
+                </div>
+                <div class="hero-badges">
+                    <span class="invite-pill">支持托管 Solver</span>
+                    <span class="invite-pill">支持外部 FlareSolverr</span>
+                    <span class="invite-pill">任务日志持久化</span>
+                </div>
+            </section>
+
+            <div class="grok-shell">
+                <aside class="grok-sidebar">
+                    <div class="card grok-card sticky-stack">
+                        <div class="card-header">
+                            <div class="card-header-copy">
+                                <h3>配置</h3>
+                            </div>
+                            <button id="grok-save-config-btn" class="btn btn-secondary btn-sm" type="button">保存默认值</button>
+                        </div>
+                        <div class="card-body panel-stack">
+                            <div class="form-group">
+                                <label for="grok-proxy">代理地址</label>
+                                <input id="grok-proxy" type="text" placeholder="留空则不使用">
+                            </div>
+                            <div class="inline-row">
+                                <div class="form-group">
+                                    <label for="grok-target-count">目标数量</label>
+                                    <input id="grok-target-count" type="number" min="1" max="200" value="1">
+                                </div>
+                                <div class="form-group">
+                                    <label for="grok-thread-count">线程数</label>
+                                    <input id="grok-thread-count" type="number" min="1" max="10" value="1">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="grok-email-domain">邮箱域名</label>
+                                <input id="grok-email-domain" type="text" value="bczy.site">
+                            </div>
+                            <div class="form-group">
+                                <label for="grok-email-service-type">邮箱服务</label>
+                                <select id="grok-email-service-type">
+                                    <option value="auto">自动选择</option>
+                                </select>
+                            </div>
+                            <div class="form-group" id="grok-email-service-id-wrap" style="display: none;">
+                                <label for="grok-email-service-id">具体服务</label>
+                                <select id="grok-email-service-id">
+                                    <option value="">自动选择</option>
+                                </select>
+                            </div>
+                            <div id="grok-email-service-hint" class="hint-line">自动按邮箱域名和服务优先级复用程序中的邮箱服务。</div>
+                            <div class="form-group">
+                                <label for="grok-captcha-mode">CAPTCHA 模式</label>
+                                <select id="grok-captcha-mode">
+                                    <option value="yescaptcha">YesCaptcha</option>
+                                    <option value="local">Local Solver</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="grok-bczy-api-key">BCZY API Key</label>
+                                <input id="grok-bczy-api-key" type="password" placeholder="留空保留已保存值">
+                                <div id="grok-bczy-saved" class="hint-line"></div>
+                            </div>
+                            <div class="form-group">
+                                <label for="grok-yescaptcha-key">YesCaptcha Key</label>
+                                <input id="grok-yescaptcha-key" type="password" placeholder="留空保留已保存值">
+                                <div id="grok-yescaptcha-saved" class="hint-line"></div>
+                            </div>
+                            <div class="form-group" id="grok-solver-url-wrap">
+                                <label for="grok-solver-url">Solver URL</label>
+                                <input id="grok-solver-url" type="text" value="http://127.0.0.1:5072">
+                            </div>
+                            <div class="form-group">
+                                <label for="grok-solver-command">Solver 命令</label>
+                                <input id="grok-solver-command" type="text" placeholder="留空自动发现 api_solver.py 并后台启动">
+                                <div class="hint-line">可填 `python D:\路径\api_solver.py --browser_type camoufox --thread 5`，留空则自动发现。</div>
+                            </div>
+                            <div class="form-group">
+                                <label for="grok-flaresolverr-url">FlareSolverr URL</label>
+                                <input id="grok-flaresolverr-url" type="text" value="http://127.0.0.1:8191/v1">
+                            </div>
+
+                            <div class="service-grid">
+                                <div class="service-card">
+                                    <div class="service-header">
+                                        <strong>Local Solver</strong>
+                                        <span id="grok-solver-status" class="status-badge pending">未启动</span>
+                                    </div>
+                                    <div class="inline-actions">
+                                        <button id="grok-solver-start-btn" class="btn btn-secondary btn-sm" type="button">启动</button>
+                                        <button id="grok-solver-stop-btn" class="btn btn-secondary btn-sm" type="button">停止</button>
+                                    </div>
+                                </div>
+                                <div class="service-card">
+                                    <div class="service-header">
+                                        <strong>FlareSolverr</strong>
+                                        <span id="grok-flaresolverr-status" class="status-badge pending">未启动</span>
+                                    </div>
+                                    <div class="inline-actions">
+                                        <button id="grok-flaresolverr-start-btn" class="btn btn-secondary btn-sm" type="button">启动</button>
+                                        <button id="grok-flaresolverr-stop-btn" class="btn btn-secondary btn-sm" type="button">停止</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="inline-actions">
+                                <button id="grok-start-btn" class="btn btn-primary" type="button">开始注册</button>
+                                <button id="grok-cancel-btn" class="btn btn-danger" type="button" disabled>取消任务</button>
+                            </div>
+                        </div>
+                    </div>
+                </aside>
+
+                <section class="grok-main">
+                    <div class="panel-stack">
+                        <div class="card grok-card">
+                            <div class="card-header">
+                                <div class="card-header-copy">
+                                    <h3>任务状态</h3>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="summary-grid">
+                                    <div class="summary-card summary-card-wide">
+                                        <span>任务 UUID</span>
+                                        <strong id="grok-task-uuid">-</strong>
+                                    </div>
+                                    <div class="summary-card">
+                                        <span>状态</span>
+                                        <strong id="grok-task-status">待开始</strong>
+                                    </div>
+                                    <div class="summary-card">
+                                        <span>成功</span>
+                                        <strong id="grok-task-success">0</strong>
+                                    </div>
+                                    <div class="summary-card">
+                                        <span>失败</span>
+                                        <strong id="grok-task-failed">0</strong>
+                                    </div>
+                                </div>
+                                <div id="grok-runtime-message" class="status-note">创建任务后，这里会显示实时状态。</div>
+                            </div>
+                        </div>
+
+                        <div class="card grok-card">
+                            <div class="card-header">
+                                <div class="card-header-copy">
+                                    <h3>账号进度</h3>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="table-container">
+                                    <table class="team-table">
+                                        <thead>
+                                            <tr>
+                                                <th>#</th>
+                                                <th>邮箱</th>
+                                                <th>状态</th>
+                                                <th>步骤</th>
+                                                <th>SSO</th>
+                                                <th>NSFW</th>
+                                                <th>错误</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="grok-accounts-body">
+                                            <tr>
+                                                <td colspan="7"><div class="empty-panel">创建任务后，这里会显示账号步骤明细。</div></td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card grok-card">
+                            <div class="card-header">
+                                <div class="card-header-copy">
+                                    <h3>历史任务</h3>
+                                </div>
+                                <button id="grok-refresh-history-btn" class="btn btn-ghost btn-sm" type="button">刷新</button>
+                            </div>
+                            <div class="card-body">
+                                <div id="grok-task-history" class="history-list">
+                                    <div class="empty-panel">暂无历史任务。</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <aside class="grok-log">
+                    <div class="card grok-card log-panel">
+                        <div class="card-header">
+                            <div class="card-header-copy">
+                                <h3>实时日志</h3>
+                            </div>
+                            <button id="grok-clear-log-btn" class="btn btn-ghost btn-sm" type="button">清空</button>
+                        </div>
+                        <div class="card-body">
+                            <div id="grok-log-summary" class="log-summary"></div>
+                            <div id="grok-console-log" class="console-log"></div>
+                        </div>
+                    </div>
+                </aside>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/js/utils.js?v={{ static_version }}"></script>
+    <script src="/static/js/grok_register/state.js?v={{ static_version }}"></script>
+    <script src="/static/js/grok_register/api.js?v={{ static_version }}"></script>
+    <script src="/static/js/grok_register/email_service.js?v={{ static_version }}"></script>
+    <script src="/static/js/grok_register/runtime.js?v={{ static_version }}"></script>
+    <script src="/static/js/grok_register/task.js?v={{ static_version }}"></script>
+    <script src="/static/js/grok_register/logs.js?v={{ static_version }}"></script>
+    <script src="/static/js/grok_register/app.js?v={{ static_version }}"></script>
+</body>
+</html>

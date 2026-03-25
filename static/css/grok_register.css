@@ -1,0 +1,202 @@
+.grok-register-page {
+    background:
+        radial-gradient(circle at top left, rgba(60, 110, 180, 0.14), transparent 28%),
+        radial-gradient(circle at top right, rgba(38, 160, 132, 0.12), transparent 22%),
+        linear-gradient(180deg, var(--background) 0%, var(--surface-hover) 100%);
+    min-height: 100vh;
+}
+
+.grok-register-page .container {
+    max-width: 1680px;
+}
+
+.grok-register-page .main-content {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-lg);
+}
+
+.grok-hero {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--spacing-lg);
+    padding: var(--spacing-xl);
+    border-radius: calc(var(--radius) * 1.5);
+    border: 1px solid var(--border);
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(240, 247, 255, 0.94));
+    box-shadow: var(--shadow-md);
+}
+
+.grok-hero h2 {
+    margin: 0 0 var(--spacing-sm);
+    font-size: 2rem;
+}
+
+.grok-hero p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+.hero-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-sm);
+    align-items: flex-start;
+}
+
+.grok-shell {
+    display: grid;
+    grid-template-columns: 340px minmax(0, 1fr) 360px;
+    gap: var(--spacing-lg);
+    align-items: start;
+}
+
+.sticky-stack {
+    position: sticky;
+    top: calc(60px + var(--spacing-lg));
+}
+
+.panel-stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-lg);
+}
+
+.grok-card {
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+}
+
+.inline-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--spacing-md);
+}
+
+.service-grid {
+    display: grid;
+    gap: var(--spacing-md);
+}
+
+.service-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--spacing-md);
+    background: var(--surface-hover);
+}
+
+.service-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--spacing-sm);
+    margin-bottom: var(--spacing-sm);
+}
+
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: var(--spacing-md);
+}
+
+.summary-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: var(--spacing-md);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface-hover);
+}
+
+.summary-card span {
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+}
+
+.summary-card strong {
+    font-size: 0.95rem;
+    word-break: break-word;
+}
+
+.summary-card-wide {
+    grid-column: span 2;
+}
+
+.status-note {
+    margin-top: var(--spacing-md);
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.history-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+}
+
+.history-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--spacing-md);
+    padding: var(--spacing-md);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-hover);
+}
+
+.history-copy {
+    min-width: 0;
+}
+
+.history-copy strong,
+.history-copy span {
+    display: block;
+}
+
+.history-copy span {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    margin-top: 4px;
+}
+
+.hint-line {
+    margin-top: 6px;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+.grok-register-page .team-table td {
+    vertical-align: top;
+}
+
+@media (max-width: 1280px) {
+    .grok-shell {
+        grid-template-columns: 320px minmax(0, 1fr);
+    }
+
+    .grok-log {
+        grid-column: 1 / -1;
+    }
+}
+
+@media (max-width: 960px) {
+    .grok-shell,
+    .inline-row,
+    .summary-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .summary-card-wide {
+        grid-column: span 1;
+    }
+
+    .sticky-stack {
+        position: static;
+    }
+
+    .grok-hero {
+        flex-direction: column;
+    }
+}

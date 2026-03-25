@@ -253,6 +253,7 @@ def test_create_team_invite_task_saves_retry_limit_and_platform_summary(temp_dat
             team_invite_routes.TeamInviteCreateRequest(
                 source_mode="account",
                 source_account_id=main_account.id,
+                include_source_account_upload=True,
                 retry_limit=3,
                 auto_upload_sub2api=True,
                 sub2api_service_ids=[101, 202],
@@ -263,7 +264,9 @@ def test_create_team_invite_task_saves_retry_limit_and_platform_summary(temp_dat
 
     assert response.retry_limit == 3
     assert response.upload_config["retry_limit"] == 3
+    assert response.upload_config["include_source_account_upload"] is True
     assert response.selected_platforms[0]["enabled"] is True
+    assert response.selected_platforms[0]["include_source_account"] is True
     assert response.selected_platforms[0]["service_ids"] == [101, 202]
 
 
@@ -318,6 +321,7 @@ def test_resume_team_invite_task_updates_runtime_config_and_requeues(temp_databa
             task_uuid,
             background_tasks,
             team_invite_routes.TeamInviteRuntimeConfigRequest(
+                include_source_account_upload=True,
                 retry_limit=4,
                 auto_upload_cpa=True,
                 cpa_service_ids=[9],
@@ -327,8 +331,10 @@ def test_resume_team_invite_task_updates_runtime_config_and_requeues(temp_databa
 
     assert response.status == "pending"
     assert response.retry_limit == 4
+    assert response.upload_config["include_source_account_upload"] is True
     assert response.upload_config["auto_upload_cpa"] is True
     assert response.upload_config["cpa_service_ids"] == [9]
+    assert response.selected_platforms[1]["include_source_account"] is True
     assert len(background_tasks.tasks) == 1
 
 

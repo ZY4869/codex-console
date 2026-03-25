@@ -181,16 +181,87 @@ def test_team_invite_workflow_refreshes_existing_team_members_before_upload(temp
     with get_db() as db:
         task = crud.get_team_invite_task(db, task_uuid)
         member = task.members[0]
+        refreshed_main_account = crud.get_account_by_id(db, main_account.id)
         refreshed_account = crud.get_account_by_id(db, member_account.id)
 
     assert task.status == "completed"
     assert uploaded["account_ids"] == [member_account.id]
+    assert refreshed_main_account.workspace_id == "team-acct-1"
+    assert refreshed_main_account.account_id == "team-acct-1"
+    assert refreshed_main_account.subscription_type == "team"
+    assert refreshed_main_account.access_token == "team-access-token"
     assert refreshed_account.workspace_id == "team-acct-1"
     assert refreshed_account.account_id == "team-acct-1"
     assert refreshed_account.subscription_type == "team"
     assert refreshed_account.access_token == "team-access-token"
     assert member.invitation_status == "uploaded"
     assert member.result["reason"] == "already_member"
+
+
+def test_team_invite_workflow_can_include_source_account_in_upload_queue(temp_database, monkeypatch):
+    main_account = create_account("owner@example.com")
+    member_account = create_account(
+        "member@example.com",
+        workspace_id="personal-workspace",
+        subscription_type="free",
+        access_token="stale-access-token",
+    )
+    task_uuid = create_team_invite_task_record(
+        main_account,
+        [member_account],
+        task_uuid="invite-workflow-include-source",
+        upload_config={"include_source_account_upload": True},
+    )
+
+    monkeypatch.setattr(
+        team_invite_workflow,
+        "discover_team_account",
+        lambda account, proxy: {
+            "success": True,
+            "account": {
+                "team_account_id": "team-acct-1",
+                "team_workspace_id": "team-ws-1",
+                "subscription_plan": "team",
+            },
+        },
+    )
+
+    def fake_snapshot(self, admin_account, team_account_id, proxy, *, source):
+        return {member_account.email.lower()} if source == "members" else set()
+
+    monkeypatch.setattr(team_invite_workflow.TeamInviteOrchestrator, "_read_team_email_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        team_invite_workflow,
+        "refresh_member_team_token",
+        lambda account, team_account_id, proxy: {
+            "success": True,
+            "account_id": "team-acct-1",
+            "access_token": "team-access-token",
+            "session_token": "team-session-token",
+            "expires_at": datetime.utcnow() + timedelta(hours=1),
+        },
+    )
+
+    uploaded: dict[str, list[int]] = {}
+
+    def fake_upload(self, account_ids):
+        uploaded["account_ids"] = list(account_ids)
+        result = {
+            "noop": {
+                "success_count": len(account_ids),
+                "failed_count": 0,
+                "skipped_count": 0,
+                "details": [],
+            }
+        }
+        self._record_member_upload_results(account_ids, result)
+        return result
+
+    monkeypatch.setattr(team_invite_workflow.TeamInviteOrchestrator, "_upload_selected_accounts", fake_upload)
+
+    team_invite_workflow.TeamInviteOrchestrator(task_uuid).run()
+
+    assert uploaded["account_ids"] == [member_account.id, main_account.id]
 
 
 def test_team_invite_workflow_retries_pending_invites_with_accept_flow(temp_database, monkeypatch):
@@ -220,6 +291,17 @@ def test_team_invite_workflow_retries_pending_invites_with_accept_flow(temp_data
         return {member_account.email.lower()} if source == "invites" else set()
 
     monkeypatch.setattr(team_invite_workflow.TeamInviteOrchestrator, "_read_team_email_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        team_invite_workflow,
+        "refresh_member_team_token",
+        lambda account, team_account_id, proxy: {
+            "success": True,
+            "account_id": "team-acct-1",
+            "access_token": "team-access-token",
+            "session_token": "team-session-token",
+            "expires_at": datetime.utcnow() + timedelta(hours=1),
+        },
+    )
 
     accept_calls: list[str] = []
 
@@ -302,6 +384,17 @@ def test_team_invite_workflow_requires_session_token_before_team_upload(temp_dat
         return {member_account.email.lower()} if source == "members" else set()
 
     monkeypatch.setattr(team_invite_workflow.TeamInviteOrchestrator, "_read_team_email_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        team_invite_workflow,
+        "refresh_member_team_token",
+        lambda account, team_account_id, proxy: {
+            "success": True,
+            "account_id": "team-acct-1",
+            "access_token": "team-access-token",
+            "session_token": "team-session-token",
+            "expires_at": datetime.utcnow() + timedelta(hours=1),
+        },
+    )
     monkeypatch.setattr(
         team_invite_workflow,
         "recover_account_session_via_login",
@@ -623,7 +716,8 @@ def test_upload_selected_accounts_blocks_duplicate_refresh_tokens_before_sub2api
     )
 
     assert calls == []
-    assert results["sub2api"]["failed_count"] == 2
+    assert results["sub2api"]["failed_count"] == 0
+    assert results["sub2api"]["skipped_count"] == 2
     assert results["sub2api"]["details"][0]["reason_code"] == "team_refresh_token_duplicate"
 
     with get_db() as db:
@@ -638,7 +732,12 @@ def test_upload_selected_accounts_blocks_duplicate_refresh_tokens_before_sub2api
 
 
 def test_relogin_members_forces_login_for_relogin_guidance_members(temp_database, monkeypatch):
-    main_account = create_account("owner@example.com")
+    main_account = create_account(
+        "owner@example.com",
+        subscription_type="team",
+        account_id="team-acct-1",
+        workspace_id="team-acct-1",
+    )
     member_account = create_account(
         "member@example.com",
         subscription_type="team",

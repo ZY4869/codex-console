@@ -370,8 +370,11 @@ def build_account_summary(account: Optional[Account]) -> Optional[Dict[str, Any]
     return {
         "id": account.id,
         "email": account.email,
+        "email_service": account.email_service,
         "password": account.password,
         "remark": account.remark,
+        "status": account.status,
+        "source": account.source,
         "account_id": account.account_id,
         "workspace_id": account.workspace_id,
         "subscription_type": account.subscription_type,

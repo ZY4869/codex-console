@@ -386,5 +386,6 @@ def test_upload_team_payload_blocks_duplicate_refresh_tokens_before_sub2api_requ
     results = team_routes.TeamOrchestrator("task-team-guard")._upload_team_payload("team-acct-1")
 
     assert calls == []
-    assert results["sub2api"]["failed_count"] == 2
+    assert results["sub2api"]["failed_count"] == 0
+    assert results["sub2api"]["skipped_count"] == 2
     assert results["sub2api"]["details"][0]["reason_code"] == "team_refresh_token_duplicate"

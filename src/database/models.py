@@ -234,3 +234,4 @@ class Proxy(Base):
 
 
 from .team_models import TeamTask, TeamMember, TeamInviteTask, TeamInviteMember  # noqa: E402,F401
+from .grok_models import GrokRegisterTask, GrokRegisterAccount  # noqa: E402,F401

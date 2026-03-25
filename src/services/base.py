@@ -12,6 +12,7 @@ from ..config.constants import EmailServiceType
 
 
 logger = logging.getLogger(__name__)
+VERIFICATION_EMAIL_KEYWORDS = ("openai", "xai", "x.ai", "grok")
 
 
 class EmailServiceError(Exception):
@@ -162,7 +163,6 @@ class BaseEmailService(abc.ABC):
             if email_info.get("id") == email_id:
                 return email_info
         return None
-
     def wait_for_email(
         self,
         email: str,
@@ -303,6 +303,11 @@ class BaseEmailService(abc.ABC):
     def __str__(self) -> str:
         """字符串表示"""
         return f"{self.name} ({self.service_type.value})"
+
+
+def looks_like_verification_email(*parts: str) -> bool:
+    text = "\n".join(str(part or "") for part in parts).lower()
+    return any(keyword in text for keyword in VERIFICATION_EMAIL_KEYWORDS)
 
 
 class EmailServiceFactory:

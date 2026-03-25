@@ -10,7 +10,7 @@ import json
 
 from curl_cffi import requests as cffi_requests
 
-from .base import BaseEmailService, EmailServiceError, EmailServiceType
+from .base import BaseEmailService, EmailServiceError, EmailServiceType, looks_like_verification_email
 from ..core.http_client import HTTPClient, RequestConfig
 from ..config.constants import OTP_CODE_PATTERN
 
@@ -201,7 +201,7 @@ class TempmailService(BaseEmailService):
                     content = "\n".join([sender, subject, body, html])
 
                     # 检查是否是 OpenAI 邮件
-                    if "openai" not in sender and "openai" not in content.lower():
+                    if not looks_like_verification_email(sender, subject, content):
                         continue
 
                     # 提取验证码

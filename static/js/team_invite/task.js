@@ -17,6 +17,54 @@
         return app.sourceTypeMeta[sourceType] || sourceType || '-';
     }
 
+    function getMainAccountUploadStatus(row) {
+        if (!row?.includedInUpload) {
+            return 'accepted';
+        }
+        if (row?.uploadStatus) {
+            return row.uploadStatus;
+        }
+        if (row?.platformUploads && Object.keys(row.platformUploads).length) {
+            return Object.values(row.platformUploads).every((item) => item?.success) ? 'uploaded' : 'failed';
+        }
+        return row?.teamReady ? 'accepted' : 'pending';
+    }
+
+    function buildMainAccountNote(row) {
+        if (!row?.includedInUpload) {
+            return '主账号用于维持 Team 上下文，不参与成员上传。';
+        }
+        const uploadStatus = getMainAccountUploadStatus(row);
+        if (uploadStatus === 'uploaded') {
+            return '主账号已完成 Team 身份同步，并跟随成员一起上传。';
+        }
+        if (uploadStatus === 'failed') {
+            const firstUpload = Object.values(row.platformUploads || {}).find((item) => item && !item.success);
+            return firstUpload?.error || '主账号上传失败，请查看上传结果。';
+        }
+        if (row?.teamReady) {
+            return '主账号 Team 身份已同步，上传阶段会跟成员一起提交到所选平台。';
+        }
+        return '开始任务后会先同步主账号 Team 身份，再跟成员一起上传。';
+    }
+
+    function getMainAccountStatusMeta(row) {
+        const uploadStatus = getMainAccountUploadStatus(row);
+        if (uploadStatus === 'uploaded') {
+            return { text: '已上传', className: 'completed' };
+        }
+        if (uploadStatus === 'failed') {
+            return { text: '上传失败', className: 'failed' };
+        }
+        if (uploadStatus === 'uploading') {
+            return { text: '上传中', className: 'running' };
+        }
+        if (row?.teamReady) {
+            return { text: row?.includedInUpload ? '待上传' : '管理员', className: 'completed' };
+        }
+        return { text: '待同步', className: 'pending' };
+    }
+
     function getGuidance(row) {
         if (row?.guidance?.action) {
             return row.guidance;
@@ -59,13 +107,16 @@
                 email: task.source_account.email,
                 roleLabel: '主账号',
                 sourceLabel: 'Team 主账号',
-                invitationStatus: 'accepted',
-                teamReady: true,
+                invitationStatus: task.source_account.upload_status || 'accepted',
+                teamReady: Boolean(task.source_account.team_ready),
                 note: task.team_account_id ? `目标 Team：${task.team_account_id}` : '运行时自动发现 Team',
                 actionFlags: {},
                 account: task.source_account,
                 raw: task.source_account,
                 sourceType: 'main_account',
+                includedInUpload: Boolean(task.source_account.included_in_upload),
+                platformUploads: task.source_account.platform_uploads || {},
+                uploadStatus: task.source_account.upload_status,
                 guidance: {
                     action: 'none',
                     label: '主账号上下文',
@@ -96,6 +147,95 @@
         });
 
         return rows;
+    }
+
+    function buildMainAccountSourceLabel(task) {
+        const emailService = app.formatEmailServiceType(task?.source_account?.email_service);
+        if (task?.source_mode === 'custom_domain_email') {
+            return `自定义主号 · ${emailService}`;
+        }
+        return `Team 主账号 · ${emailService}`;
+    }
+
+    function buildTaskRows(task) {
+        const rows = [];
+        if (task?.source_account?.id) {
+            rows.push({
+                key: app.buildMemberKey('main', task.source_account.id, task.source_account.email),
+                kind: 'main_account',
+                memberId: null,
+                accountId: task.source_account.id,
+                email: task.source_account.email,
+                roleLabel: '主账号',
+                sourceLabel: buildMainAccountSourceLabel(task),
+                invitationStatus: task.source_account.upload_status || 'accepted',
+                teamReady: Boolean(task.source_account.team_ready),
+                note: task.team_account_id ? `目标 Team：${task.team_account_id}` : '运行时自动发现 Team',
+                actionFlags: {},
+                account: task.source_account,
+                raw: task.source_account,
+                sourceType: 'main_account',
+                includedInUpload: Boolean(task.source_account.included_in_upload),
+                platformUploads: task.source_account.platform_uploads || {},
+                uploadStatus: task.source_account.upload_status,
+                guidance: {
+                    action: 'none',
+                    label: '主账号上下文',
+                    tone: 'completed',
+                    message: '主账号用于维持 Team 上下文，不参与成员重登建议。',
+                },
+            });
+        }
+
+        (task?.members || []).forEach((member) => {
+            rows.push({
+                key: app.buildMemberKey('member', member.id, member.email),
+                kind: member.source_type === 'manual' ? 'manual' : 'member',
+                memberId: member.id,
+                accountId: member.account_id,
+                email: member.email,
+                roleLabel: '成员',
+                sourceLabel: formatSourceLabel(member.source_type),
+                invitationStatus: member.invitation_status,
+                teamReady: Boolean(member.team_ready),
+                note: member.error_message || buildMemberNote(member),
+                actionFlags: member.action_flags || {},
+                account: member.account,
+                raw: member,
+                sourceType: member.source_type,
+                guidance: member.guidance || null,
+            });
+        });
+
+        return rows;
+    }
+
+    function decorateMainAccountRows(rows) {
+        return (rows || []).map((row) => {
+            if (row?.kind !== 'main_account') {
+                return row;
+            }
+            const nextRow = {
+                ...row,
+                includedInUpload: Boolean(row?.includedInUpload ?? row?.raw?.included_in_upload),
+                platformUploads: row?.platformUploads || row?.raw?.platform_uploads || {},
+                uploadStatus: row?.uploadStatus || row?.raw?.upload_status || null,
+                teamReady: typeof row?.raw?.team_ready === 'boolean' ? Boolean(row.raw.team_ready) : Boolean(row?.teamReady),
+                invitationStatus: row?.uploadStatus || row?.raw?.upload_status || row?.invitationStatus || 'accepted',
+            };
+            nextRow.note = buildMainAccountNote(nextRow);
+            nextRow.guidance = {
+                action: 'none',
+                label: nextRow.includedInUpload
+                    ? (getMainAccountUploadStatus(nextRow) === 'failed'
+                        ? '主号上传失败'
+                        : (getMainAccountUploadStatus(nextRow) === 'uploaded' ? '主号已上传' : '主号会一起上传'))
+                    : '仅主号上下文',
+                tone: getMainAccountUploadStatus(nextRow) === 'failed' ? 'failed' : 'completed',
+                message: buildMainAccountNote(nextRow),
+            };
+            return nextRow;
+        });
     }
 
     function buildMemberNote(member) {
@@ -164,7 +304,7 @@
                 taskUuid: state.currentTask.task_uuid,
                 status: state.currentTask.status,
                 statusMeta: app.getTaskStatusMeta(state.currentTask.status),
-                rows: buildTaskRows(state.currentTask),
+                rows: decorateMainAccountRows(buildTaskRows(state.currentTask)),
                 teamMemberCount: state.currentTask.team_member_count || 0,
                 customMemberCount: state.currentTask.custom_member_count || 0,
                 note: buildTaskNote(state.currentTask),
@@ -179,7 +319,7 @@
             taskUuid: null,
             status: 'preview',
             statusMeta: { text: '预览', className: 'pending' },
-            rows: preview.members || [],
+            rows: decorateMainAccountRows(preview.members || []),
             teamMemberCount: preview.team_member_count || 0,
             customMemberCount: preview.custom_member_count || 0,
             note: buildPreviewNote(preview),
@@ -318,6 +458,33 @@
                         <div class="member-email">
                             <strong>${app.escapeHtml(row.email)}</strong>
                             <span class="member-meta">${app.escapeHtml(row.roleLabel || '')}${row.teamReady ? ' · Team-ready' : ''}</span>
+                        </div>
+                    </td>
+                    <td>${renderStatusBadge(statusMeta)}</td>
+                    <td>${renderGuidancePill(row)}</td>
+                    <td>${renderActions(row, viewState)}</td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    function renderMembersEnhanced(viewState) {
+        if (!viewState.rows.length) {
+            renderMembers(viewState);
+            return;
+        }
+
+        const selectedRow = ensureSelectedMember(viewState);
+        elements.membersBody.innerHTML = viewState.rows.map((row) => {
+            const statusMeta = row.kind === 'main_account'
+                ? getMainAccountStatusMeta(row)
+                : app.getMemberStatusMeta(row.invitationStatus);
+            return `
+                <tr class="${selectedRow?.key === row.key ? 'active' : ''}" data-row-key="${row.key}">
+                    <td>
+                        <div class="member-email">
+                            <strong>${app.escapeHtml(row.email)}</strong>
+                            <span class="member-meta">${app.escapeHtml(row.roleLabel || '')}${row.teamReady ? ' · Team-ready' : ''}${row.kind === 'main_account' && row.includedInUpload ? ' · 跟随上传' : ''}</span>
                         </div>
                     </td>
                     <td>${renderStatusBadge(statusMeta)}</td>
@@ -467,6 +634,90 @@
         `;
     }
 
+    function renderDetail(row) {
+        if (!row) {
+            elements.accountDetail.innerHTML = '点击上方成员后，这里会展示账号详情。';
+            elements.accountDetail.className = 'empty-panel';
+            return;
+        }
+
+        if (!row.accountId) {
+            elements.accountDetail.className = 'empty-panel';
+            elements.accountDetail.innerHTML = `
+                <strong>${app.escapeHtml(row.email)}</strong><br>
+                这是手填邮箱，只会参与 invite-only 流程，不会展示本地账号详情，也不会开放成员上传。
+            `;
+            return;
+        }
+
+        const detailState = state.selectedAccountDetail && state.selectedAccountDetail.key === row.key
+            ? state.selectedAccountDetail
+            : null;
+        const account = { ...(row.account || {}), ...(detailState?.account || {}) };
+        const tokens = detailState?.tokens || {};
+        const memberResult = row.raw?.result || {};
+        const status = account.status || row.raw?.account?.status || '-';
+        const lastAction = row.raw?.last_action || memberResult.last_action || '-';
+        const loadingHint = detailState?.loading ? '<div class="hint-line">正在刷新账号详情...</div>' : '';
+        const errorHint = detailState?.error ? `<div class="warning-banner show">${app.escapeHtml(detailState.error)}</div>` : '';
+
+        const accessToken = tokens.access_token || account.access_token || '';
+        const refreshToken = tokens.refresh_token || '';
+        const sessionToken = account.session_token || '';
+
+        elements.accountDetail.className = '';
+        elements.accountDetail.innerHTML = `
+            ${loadingHint}
+            ${errorHint}
+            <div class="detail-grid">
+                <div class="detail-item">
+                    <span>邮箱</span>
+                    <strong>${app.escapeHtml(account.email || row.email)}</strong>
+                </div>
+                <div class="detail-item">
+                    <span>来源服务</span>
+                    <strong>${app.escapeHtml(app.formatEmailServiceType(account.email_service || row.raw?.email_service || row.account?.email_service))}</strong>
+                </div>
+                <div class="detail-item">
+                    <span>状态</span>
+                    <strong>${app.escapeHtml(status)}</strong>
+                </div>
+                <div class="detail-item">
+                    <span>订阅类型</span>
+                    <strong>${app.escapeHtml(account.subscription_type || '-')}</strong>
+                </div>
+                <div class="detail-item">
+                    <span>备注</span>
+                    <strong>${app.escapeHtml(account.remark || '-')}</strong>
+                </div>
+                <div class="detail-item">
+                    <span>Account ID</span>
+                    <code>${app.escapeHtml(account.account_id || '-')}</code>
+                </div>
+                <div class="detail-item">
+                    <span>Workspace ID</span>
+                    <code>${app.escapeHtml(account.workspace_id || '-')}</code>
+                </div>
+                <div class="detail-item">
+                    <span>最近动作</span>
+                    <strong>${app.escapeHtml(lastAction)}</strong>
+                </div>
+                <div class="detail-item">
+                    <span>最后刷新</span>
+                    <strong>${app.escapeHtml(account.last_refresh ? format.date(account.last_refresh) : '-')}</strong>
+                </div>
+            </div>
+            <div class="token-list">
+                ${buildTokenRow('Access Token', accessToken)}
+                ${buildTokenRow('Refresh Token', refreshToken)}
+                ${buildTokenRow('Session Token', sessionToken)}
+            </div>
+            <div style="margin-top: 12px;">
+                ${buildPlatformUploadList(row.raw?.platform_uploads || {})}
+            </div>
+        `;
+    }
+
     function renderUploadPreview(viewState) {
         if (!viewState.selectedPlatforms.length) {
             elements.uploadResults.innerHTML = '<div class="empty-panel">尚未选择上传平台。</div>';
@@ -547,12 +798,59 @@
         return cards.join('');
     }
 
-    function renderUploadResults(viewState) {
-        if (viewState.mode !== 'task' || !viewState.task) {
+    function renderUploadPreviewEnhanced(viewState) {
+        if (!viewState.selectedPlatforms.length) {
             renderUploadPreview(viewState);
             return;
         }
-        elements.uploadResults.innerHTML = buildTaskUploadCards(viewState.task, viewState.selectedPlatforms);
+
+        elements.uploadResults.innerHTML = viewState.selectedPlatforms.map((platform) => {
+            const groupCount = platform.key === 'sub2api'
+                ? Object.values(platform.group_ids_by_service || {}).reduce((sum, item) => sum + (item || []).length, 0)
+                : 0;
+            return `
+                <div class="upload-card">
+                    <h5>${app.escapeHtml(platform.label)}</h5>
+                    <p>已选择 ${platform.service_ids?.length || 0} 个服务。</p>
+                    <p>${platform.include_source_account ? '本次会包含主号一起上传。' : '本次仅上传成员账号。'}</p>
+                    <p>${platform.key === 'sub2api' ? `已勾选 ${groupCount} 个分组，实际上传会按分组复制账号并自动命名。` : '开始任务后会在这里展示平台上传进度。'}</p>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function buildTaskUploadCardsEnhanced(task, selectedPlatforms) {
+        const html = buildTaskUploadCards(task, selectedPlatforms);
+        const uploadSummary = task?.result?.upload || {};
+        const displayPlatformKeys = Array.from(new Set([
+            ...selectedPlatforms.map((item) => item.key),
+            ...Object.keys(uploadSummary).filter((key) => key !== 'team_context'),
+        ]));
+        if (!displayPlatformKeys.length) {
+            return html;
+        }
+
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        Array.from(container.querySelectorAll('.upload-card')).forEach((card, index) => {
+            const platformKey = displayPlatformKeys[index];
+            const selected = selectedPlatforms.find((item) => item.key === platformKey);
+            if (!selected) {
+                return;
+            }
+            const hint = document.createElement('p');
+            hint.textContent = selected.include_source_account ? '上传对象：成员账号 + 主号' : '上传对象：成员账号';
+            card.insertBefore(hint, card.children[2] || null);
+        });
+        return container.innerHTML;
+    }
+
+    function renderUploadResults(viewState) {
+        if (viewState.mode !== 'task' || !viewState.task) {
+            renderUploadPreviewEnhanced(viewState);
+            return;
+        }
+        elements.uploadResults.innerHTML = buildTaskUploadCardsEnhanced(viewState.task, viewState.selectedPlatforms);
     }
 
     function updateActionButtons() {
@@ -732,7 +1030,7 @@
     function render() {
         const viewState = getViewState();
         renderSummary(viewState);
-        renderMembers(viewState);
+        renderMembersEnhanced(viewState);
         renderUploadResults(viewState);
         renderDetail(ensureSelectedMember(viewState));
         updateActionButtons();

@@ -15,7 +15,7 @@ from email.policy import default as email_policy
 from html import unescape
 from typing import Optional, Dict, Any, List
 
-from .base import BaseEmailService, EmailServiceError, EmailServiceType
+from .base import BaseEmailService, EmailServiceError, EmailServiceType, looks_like_verification_email
 from ..core.http_client import HTTPClient, RequestConfig
 from ..config.constants import OTP_CODE_PATTERN
 
@@ -364,7 +364,7 @@ class TempMailService(BaseEmailService):
                     content = f"{sender}\n{subject}\n{body_text}\n{raw_text}".strip()
 
                     # 只处理 OpenAI 邮件
-                    if "openai" not in sender and "openai" not in content.lower():
+                    if not looks_like_verification_email(sender, subject, content):
                         continue
 
                     match = re.search(pattern, content)

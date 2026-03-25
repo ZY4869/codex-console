@@ -10,7 +10,7 @@ import logging
 from typing import Optional, Dict, Any, List
 from urllib.parse import urljoin
 
-from .base import BaseEmailService, EmailServiceError, EmailServiceType
+from .base import BaseEmailService, EmailServiceError, EmailServiceType, looks_like_verification_email
 from ..core.http_client import HTTPClient, RequestConfig
 from ..config.constants import OTP_CODE_PATTERN
 
@@ -338,7 +338,7 @@ class MeoMailEmailService(BaseEmailService):
                     content = f"{sender} {subject} {message_content}"
 
                     # 检查是否是 OpenAI 邮件
-                    if "openai" not in sender and "openai" not in content.lower():
+                    if not looks_like_verification_email(sender, subject, content):
                         continue
 
                     # 提取验证码 过滤掉邮箱

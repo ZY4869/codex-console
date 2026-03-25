@@ -11,6 +11,7 @@ from .email import router as email_services_router
 from .payment import router as payment_router
 from .team import router as team_router
 from .team_invite import router as team_invite_router
+from .grok_register import router as grok_register_router
 from .upload.cpa_services import router as cpa_services_router
 from .upload.sub2api_services import router as sub2api_services_router
 from .upload.tm_services import router as tm_services_router
@@ -25,6 +26,7 @@ api_router.include_router(email_services_router, prefix="/email-services", tags=
 api_router.include_router(payment_router, prefix="/payment", tags=["payment"])
 api_router.include_router(team_router, prefix="/team", tags=["team"])
 api_router.include_router(team_invite_router, prefix="/team-invite", tags=["team-invite"])
+api_router.include_router(grok_register_router, prefix="/grok-register", tags=["grok-register"])
 api_router.include_router(cpa_services_router, prefix="/cpa-services", tags=["cpa-services"])
 api_router.include_router(sub2api_services_router, prefix="/sub2api-services", tags=["sub2api-services"])
 api_router.include_router(tm_services_router, prefix="/tm-services", tags=["tm-services"])

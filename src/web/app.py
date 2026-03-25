@@ -179,6 +179,12 @@ def create_app() -> FastAPI:
             return _redirect_to_login(request)
         return templates.TemplateResponse("team_invite.html", {"request": request})
 
+    @app.get("/grok", response_class=HTMLResponse)
+    async def grok_register_page(request: Request):
+        if not _is_authenticated(request):
+            return _redirect_to_login(request)
+        return templates.TemplateResponse("grok_register.html", {"request": request})
+
     @app.on_event("startup")
     async def startup_event():
         """应用启动事件"""

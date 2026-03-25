@@ -116,6 +116,12 @@ async def team_invite_task_websocket(websocket: WebSocket, task_uuid: str):
     await task_websocket(websocket, task_uuid)
 
 
+@router.websocket("/ws/grok-register/{task_uuid}")
+async def grok_register_task_websocket(websocket: WebSocket, task_uuid: str):
+    """Grok register task WebSocket reuses the generic task channel."""
+    await task_websocket(websocket, task_uuid)
+
+
 @router.websocket("/ws/batch/{batch_id}")
 async def batch_websocket(websocket: WebSocket, batch_id: str):
     """

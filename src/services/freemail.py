@@ -10,7 +10,7 @@ import random
 import string
 from typing import Optional, Dict, Any, List
 
-from .base import BaseEmailService, EmailServiceError, EmailServiceType
+from .base import BaseEmailService, EmailServiceError, EmailServiceType, looks_like_verification_email
 from ..core.http_client import HTTPClient, RequestConfig
 from ..config.constants import OTP_CODE_PATTERN
 
@@ -233,7 +233,7 @@ class FreemailService(BaseEmailService):
                     
                     content = f"{sender}\n{subject}\n{preview}"
                     
-                    if "openai" not in content.lower():
+                    if not looks_like_verification_email(content):
                         continue
 
                     # 尝试直接使用 Freemail 提取的验证码

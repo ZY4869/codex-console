@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from html import unescape
 from typing import Any, Dict, List, Optional
 
-from .base import BaseEmailService, EmailServiceError, EmailServiceType
+from .base import BaseEmailService, EmailServiceError, EmailServiceType, looks_like_verification_email
 from ..config.constants import OTP_CODE_PATTERN
 from ..core.http_client import HTTPClient, RequestConfig
 
@@ -276,7 +276,7 @@ class DuckMailService(BaseEmailService):
                     )
 
                     content = self._message_search_text(message, detail)
-                    if "openai" not in content.lower():
+                    if not looks_like_verification_email(content):
                         continue
 
                     match = re.search(pattern, content)

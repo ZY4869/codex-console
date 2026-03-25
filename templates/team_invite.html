@@ -20,6 +20,7 @@
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/team" class="nav-link">Team 创建</a>
                 <a href="/team/invite" class="nav-link active">Team 邀请</a>
+                <a href="/grok" class="nav-link">Grok注册</a>
                 <a href="/settings" class="nav-link">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
             </div>
@@ -55,7 +56,27 @@
                                     </div>
                                     <div class="compact-form">
                                         <div class="form-group">
+                                            <label for="team-source-mode">主号来源</label>
+                                            <select id="team-source-mode">
+                                                <option value="account">现有 Team 主号</option>
+                                                <option value="custom_domain_email">自定义主号</option>
+                                            </select>
+                                        </div>
+                                        <div id="team-source-account-wrap" class="form-group">
+                                            <label for="team-source-account-id">现有 Team 主号</label>
                                             <select id="team-source-account-id"></select>
+                                        </div>
+                                        <div id="team-custom-source-wrap" class="compact-form" hidden>
+                                            <div class="inline-row">
+                                                <div class="form-group">
+                                                    <label for="team-custom-source-email">自定义域名邮箱</label>
+                                                    <input id="team-custom-source-email" type="email" placeholder="例如 admin@kan69.fun">
+                                                </div>
+                                                <div class="form-group">
+                                                    <label for="team-custom-source-service-type">邮箱服务类型</label>
+                                                    <select id="team-custom-source-service-type"></select>
+                                                </div>
+                                            </div>
                                         </div>
                                         <div id="team-source-summary" class="soft-box">
                                             <p>选择主账号后展示 Team 摘要</p>
@@ -110,6 +131,13 @@
                                 <section class="panel-section">
                                     <div class="section-title">
                                         <h4>上传平台</h4>
+                                    </div>
+                                    <div class="soft-box">
+                                        <label class="checkbox-row">
+                                            <input id="team-upload-source-account" type="checkbox">
+                                            <span>主号一起上传</span>
+                                        </label>
+                                        <div class="hint-line">开始上传前会先同步主号 Team 身份；勾选后主号会跟成员一起上传到已选平台。</div>
                                     </div>
                                     <div class="check-grid">
                                         <div class="check-card">

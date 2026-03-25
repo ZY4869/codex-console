@@ -6,6 +6,7 @@
             accounts: [],
             sourceAccounts: [],
             teamTasks: [],
+            customSourceServiceTypes: [],
         },
         teamEmailServices: [],
         uploadServices: {
@@ -66,8 +67,23 @@
         manual: '手填邮箱',
     };
 
+    app.emailServiceTypeLabels = {
+        moe_mail: 'MoeMail',
+        temp_mail: 'Temp-Mail',
+        duck_mail: 'DuckMail',
+        freemail: 'Freemail',
+        outlook: 'Outlook',
+        imap_mail: 'IMAP',
+        tempmail: 'Tempmail',
+    };
+
     app.elements = {
+        sourceMode: document.getElementById('team-source-mode'),
+        sourceAccountWrap: document.getElementById('team-source-account-wrap'),
+        customSourceWrap: document.getElementById('team-custom-source-wrap'),
         sourceAccountId: document.getElementById('team-source-account-id'),
+        customSourceEmail: document.getElementById('team-custom-source-email'),
+        customSourceServiceType: document.getElementById('team-custom-source-service-type'),
         sourceAccountCount: document.getElementById('source-account-count'),
         sourceSummary: document.getElementById('team-source-summary'),
         existingAccountIds: document.getElementById('team-existing-account-ids'),
@@ -78,6 +94,7 @@
         registerAccountBtn: document.getElementById('team-register-account-btn'),
         registerStatus: document.getElementById('team-register-status'),
         manualEmails: document.getElementById('team-manual-emails'),
+        uploadSourceAccount: document.getElementById('team-upload-source-account'),
         uploadSub2api: document.getElementById('team-upload-sub2api'),
         uploadSub2apiBody: document.getElementById('team-upload-sub2api-body'),
         sub2apiServiceIds: document.getElementById('team-sub2api-service-ids'),
@@ -156,6 +173,14 @@
         return Number.isFinite(numeric) ? numeric : fallback;
     };
 
+    app.normalizeEmail = function normalizeEmail(value) {
+        return String(value || '').trim().toLowerCase();
+    };
+
+    app.formatEmailServiceType = function formatEmailServiceType(value) {
+        return app.emailServiceTypeLabels[value] || value || '-';
+    };
+
     app.findSourceTaskByAccountId = function findSourceTaskByAccountId(accountId) {
         return app.state.sources.teamTasks.find((task) => String(task.main_account?.id || task.main_account_id || '') === String(accountId)) || null;
     };
@@ -164,11 +189,61 @@
         return app.state.sources.accounts.find((account) => String(account.id) === String(accountId)) || null;
     };
 
+    app.findAccountByEmail = function findAccountByEmail(email) {
+        const normalizedEmail = app.normalizeEmail(email);
+        if (!normalizedEmail) {
+            return null;
+        }
+        const seenIds = new Set();
+        const merged = [...(app.state.sources.accounts || []), ...(app.state.sources.sourceAccounts || [])];
+        for (const account of merged) {
+            if (!account || seenIds.has(String(account.id))) {
+                continue;
+            }
+            seenIds.add(String(account.id));
+            if (app.normalizeEmail(account.email) === normalizedEmail) {
+                return account;
+            }
+        }
+        return null;
+    };
+
+    app.findAccountByEmailService = function findAccountByEmailService(email, serviceType) {
+        const normalizedEmail = app.normalizeEmail(email);
+        const normalizedServiceType = String(serviceType || '').trim().toLowerCase();
+        if (!normalizedEmail || !normalizedServiceType) {
+            return null;
+        }
+        return (app.state.sources.accounts || []).find((account) => (
+            app.normalizeEmail(account.email) === normalizedEmail
+            && String(account.email_service || '').trim().toLowerCase() === normalizedServiceType
+        )) || null;
+    };
+
+    app.getSelectedSourceMode = function getSelectedSourceMode() {
+        return app.elements.sourceMode?.value || 'account';
+    };
+
+    app.getCustomSourceSelection = function getCustomSourceSelection() {
+        const email = app.normalizeEmail(app.elements.customSourceEmail?.value);
+        const serviceType = String(app.elements.customSourceServiceType?.value || '').trim().toLowerCase();
+        return {
+            email,
+            serviceType,
+            account: app.findAccountByEmailService(email, serviceType),
+            conflictingAccount: app.findAccountByEmail(email),
+        };
+    };
+
     app.getSelectedSourceTask = function getSelectedSourceTask() {
-        return app.findSourceTaskByAccountId(app.elements.sourceAccountId.value);
+        const sourceAccount = app.getSelectedSourceAccount();
+        return sourceAccount ? app.findSourceTaskByAccountId(sourceAccount.id) : null;
     };
 
     app.getSelectedSourceAccount = function getSelectedSourceAccount() {
+        if (app.getSelectedSourceMode() === 'custom_domain_email') {
+            return app.getCustomSourceSelection().account;
+        }
         return app.state.sources.sourceAccounts.find((account) => String(account.id) === String(app.elements.sourceAccountId.value)) || null;
     };
 

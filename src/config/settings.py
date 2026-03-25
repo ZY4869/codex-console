@@ -25,6 +25,7 @@ class SettingCategory(str, Enum):
     CUSTOM_DOMAIN = "moe_mail"
     SECURITY = "security"
     CPA = "cpa"
+    GROK = "grok"
 
 
 @dataclass
@@ -344,6 +345,92 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
     ),
 
     # 验证码配置
+    "grok_default_target_count": SettingDefinition(
+        db_key="grok.default_target_count",
+        default_value=1,
+        category=SettingCategory.GROK,
+        description="Grok 默认注册数量"
+    ),
+    "grok_default_thread_count": SettingDefinition(
+        db_key="grok.default_thread_count",
+        default_value=1,
+        category=SettingCategory.GROK,
+        description="Grok 默认并发线程数"
+    ),
+    "grok_default_proxy": SettingDefinition(
+        db_key="grok.default_proxy",
+        default_value="",
+        category=SettingCategory.GROK,
+        description="Grok 默认代理地址"
+    ),
+    "grok_default_email_domain": SettingDefinition(
+        db_key="grok.default_email_domain",
+        default_value="bczy.site",
+        category=SettingCategory.GROK,
+        description="Grok 默认邮箱域名"
+    ),
+    "grok_default_email_service_type": SettingDefinition(
+        db_key="grok.default_email_service_type",
+        default_value="auto",
+        category=SettingCategory.GROK,
+        description="Grok 默认邮箱服务类型"
+    ),
+    "grok_default_email_service_id": SettingDefinition(
+        db_key="grok.default_email_service_id",
+        default_value="",
+        category=SettingCategory.GROK,
+        description="Grok 默认邮箱服务 ID"
+    ),
+    "grok_default_captcha_mode": SettingDefinition(
+        db_key="grok.default_captcha_mode",
+        default_value="yescaptcha",
+        category=SettingCategory.GROK,
+        description="Grok 默认验证码模式"
+    ),
+    "grok_default_solver_url": SettingDefinition(
+        db_key="grok.default_solver_url",
+        default_value="http://127.0.0.1:5072",
+        category=SettingCategory.GROK,
+        description="Grok 默认本地 Solver 地址"
+    ),
+    "grok_default_flaresolverr_url": SettingDefinition(
+        db_key="grok.default_flaresolverr_url",
+        default_value="http://127.0.0.1:8191/v1",
+        category=SettingCategory.GROK,
+        description="Grok 默认 FlareSolverr 地址"
+    ),
+    "grok_default_bczy_api_key": SettingDefinition(
+        db_key="grok.default_bczy_api_key",
+        default_value="",
+        category=SettingCategory.GROK,
+        description="Grok 默认 BCZY API Key",
+        is_secret=True
+    ),
+    "grok_default_yescaptcha_key": SettingDefinition(
+        db_key="grok.default_yescaptcha_key",
+        default_value="",
+        category=SettingCategory.GROK,
+        description="Grok 默认 YesCaptcha Key",
+        is_secret=True
+    ),
+    "grok_managed_solver_port": SettingDefinition(
+        db_key="grok.managed_solver_port",
+        default_value=5072,
+        category=SettingCategory.GROK,
+        description="Grok 托管 Solver 端口"
+    ),
+    "grok_solver_command": SettingDefinition(
+        db_key="grok.solver_command",
+        default_value="",
+        category=SettingCategory.GROK,
+        description="Grok 托管 TurnstileSolver 启动命令"
+    ),
+    "grok_flaresolverr_command": SettingDefinition(
+        db_key="grok.flaresolverr_command",
+        default_value="flaresolverr",
+        category=SettingCategory.GROK,
+        description="Grok 托管 FlareSolverr 启动命令"
+    ),
     "email_code_timeout": SettingDefinition(
         db_key="email_code.timeout",
         default_value=120,
@@ -405,6 +492,10 @@ SETTING_TYPES: Dict[str, Type] = {
     "tempmail_max_retries": int,
     "tm_enabled": bool,
     "cpa_enabled": bool,
+    "grok_default_target_count": int,
+    "grok_default_thread_count": int,
+    "grok_managed_solver_port": int,
+    "grok_solver_command": str,
     "email_code_timeout": int,
     "email_code_poll_interval": int,
     "outlook_provider_priority": list,
@@ -690,6 +781,20 @@ class Settings(BaseModel):
     cpa_api_token: SecretStr = SecretStr("")
 
     # 验证码配置
+    grok_default_target_count: int = 1
+    grok_default_thread_count: int = 1
+    grok_default_proxy: str = ""
+    grok_default_email_domain: str = "bczy.site"
+    grok_default_email_service_type: str = "auto"
+    grok_default_email_service_id: str = ""
+    grok_default_captcha_mode: str = "yescaptcha"
+    grok_default_solver_url: str = "http://127.0.0.1:5072"
+    grok_default_flaresolverr_url: str = "http://127.0.0.1:8191/v1"
+    grok_default_bczy_api_key: Optional[SecretStr] = None
+    grok_default_yescaptcha_key: Optional[SecretStr] = None
+    grok_managed_solver_port: int = 5072
+    grok_solver_command: str = ""
+    grok_flaresolverr_command: str = "flaresolverr"
     email_code_timeout: int = 120
     email_code_poll_interval: int = 3
 
