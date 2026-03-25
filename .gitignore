@@ -30,6 +30,7 @@ uv.lock
 # IDE
 .idea/
 .vscode/
+.claude/settings.local.json
 *.swp
 *.swo
 *~
@@ -37,6 +38,8 @@ uv.lock
 # Data and Logs
 data/
 logs/
+.pytest_cache/
+tests_runtime/
 *.db
 *.sqlite
 *.sqlite3
@@ -56,3 +59,6 @@ Thumbs.db
 # Project specific
 backups/
 /out/
+*.har
+tmp_*.js
+.tmp_*/
