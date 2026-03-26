@@ -131,6 +131,36 @@ def find_sub2api_account_ids_by_names(
     return results
 
 
+def search_sub2api_accounts(
+    api_url: str,
+    api_key: str,
+    search: str,
+    platform: str = "openai",
+    page_size: int = 100,
+) -> List[Dict[str, Any]]:
+    term = str(search or "").strip()
+    if not term:
+        return []
+
+    response = cffi_requests.get(
+        api_url.rstrip("/") + "/api/v1/admin/accounts",
+        headers=_headers(api_key),
+        params={
+            "page": 1,
+            "page_size": page_size,
+            "platform": platform,
+            "search": term,
+        },
+        proxies=None,
+        timeout=15,
+        impersonate="chrome110",
+    )
+    data = _parse_response(response)
+    if not isinstance(data, dict):
+        return []
+    return [item for item in (data.get("items") or []) if isinstance(item, dict)]
+
+
 def bind_sub2api_accounts_to_groups(
     api_url: str,
     api_key: str,

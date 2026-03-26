@@ -26,9 +26,11 @@
         displayedLogs: new Set(),
         registrationTaskUuid: null,
         registrationPollTimer: null,
+        memberDrafts: (window.storage && window.storage.get('team_invite_member_drafts_v1', {})) || {},
     };
 
     app.taskStorageKey = 'team_invite_active_task_uuid';
+    app.memberDraftStorageKey = 'team_invite_member_drafts_v1';
     app.runningInviteStatuses = new Set(['pending', 'verifying', 'inviting', 'accepting', 'uploading']);
 
     app.statusMeta = {
@@ -177,6 +179,36 @@
         return String(value || '').trim().toLowerCase();
     };
 
+    function normalizeMemberDraft(draft) {
+        const existingAccountIds = Array.from(new Set(
+            (Array.isArray(draft?.existing_account_ids) ? draft.existing_account_ids : [])
+                .map((value) => app.parseInteger(value, 0))
+                .filter((value) => value > 0)
+                .map((value) => String(value))
+        ));
+        const seenEmails = new Set();
+        const manualEmails = [];
+        (Array.isArray(draft?.manual_emails) ? draft.manual_emails : []).forEach((value) => {
+            const normalizedEmail = app.normalizeEmail(value);
+            if (!normalizedEmail || seenEmails.has(normalizedEmail)) {
+                return;
+            }
+            seenEmails.add(normalizedEmail);
+            manualEmails.push(normalizedEmail);
+        });
+        return {
+            existing_account_ids: existingAccountIds,
+            manual_emails: manualEmails,
+        };
+    }
+
+    function persistMemberDrafts() {
+        if (!window.storage) {
+            return false;
+        }
+        return window.storage.set(app.memberDraftStorageKey, app.state.memberDrafts || {});
+    }
+
     app.formatEmailServiceType = function formatEmailServiceType(value) {
         return app.emailServiceTypeLabels[value] || value || '-';
     };
@@ -222,6 +254,58 @@
 
     app.getSelectedSourceMode = function getSelectedSourceMode() {
         return app.elements.sourceMode?.value || 'account';
+    };
+
+    app.buildMemberDraftKey = function buildMemberDraftKey(options = {}) {
+        const sourceMode = String(options.sourceMode || app.getSelectedSourceMode()).trim();
+        if (sourceMode === 'custom_domain_email') {
+            const email = app.normalizeEmail(options.customSourceEmail ?? app.elements.customSourceEmail?.value);
+            const serviceType = String(
+                options.customSourceServiceType ?? app.elements.customSourceServiceType?.value ?? ''
+            ).trim().toLowerCase();
+            if (!email || !serviceType) {
+                return null;
+            }
+            return `custom:${serviceType}:${email}`;
+        }
+
+        const sourceAccountId = app.parseInteger(options.sourceAccountId ?? app.elements.sourceAccountId?.value, 0);
+        if (!sourceAccountId) {
+            return null;
+        }
+        return `account:${sourceAccountId}`;
+    };
+
+    app.getCurrentMemberDraftKey = function getCurrentMemberDraftKey() {
+        return app.buildMemberDraftKey();
+    };
+
+    app.getMemberDraft = function getMemberDraft(key) {
+        if (!key) {
+            return null;
+        }
+        return normalizeMemberDraft(app.state.memberDrafts?.[key]);
+    };
+
+    app.setMemberDraft = function setMemberDraft(key, draft) {
+        if (!key) {
+            return false;
+        }
+        const normalized = normalizeMemberDraft(draft);
+        if (!normalized.existing_account_ids.length && !normalized.manual_emails.length) {
+            delete app.state.memberDrafts[key];
+            return persistMemberDrafts();
+        }
+        app.state.memberDrafts[key] = normalized;
+        return persistMemberDrafts();
+    };
+
+    app.removeMemberDraft = function removeMemberDraft(key) {
+        if (!key) {
+            return false;
+        }
+        delete app.state.memberDrafts[key];
+        return persistMemberDrafts();
     };
 
     app.getCustomSourceSelection = function getCustomSourceSelection() {

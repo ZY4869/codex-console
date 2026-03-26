@@ -135,8 +135,8 @@
                 toast.warning('请选择自定义主号的邮箱服务类型');
                 return;
             }
-            if (!selection.account) {
-                toast.warning('当前邮箱还没有匹配到可用的本地账号');
+            if (!selection.account && selection.conflictingAccount) {
+                toast.warning('本地已存在同邮箱账号，但邮箱服务类型与当前选择不一致');
                 return;
             }
         } else if (!payload.source_account_id) {

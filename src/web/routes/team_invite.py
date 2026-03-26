@@ -3,6 +3,7 @@ Team 邀请 API 路由。
 """
 
 import asyncio
+import logging
 import re
 import uuid
 from datetime import datetime
@@ -12,7 +13,11 @@ from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 
+from ...config.constants import OPENAI_PAGE_TYPES
+from ...config.settings import get_settings
+from ...core.register import RegistrationEngine, RegistrationResult
 from ...core.team_invite_workflow import TeamInviteOrchestrator, build_team_invite_response
+from ...core.team_workflow import recover_account_session_via_login
 from ...core.upload.sub2api_groups import fetch_sub2api_groups
 from ...core.upload.sub2api_naming import (
     discover_sub2api_identity_occupied_name_indices,
@@ -24,10 +29,13 @@ from ...core.upload.sub2api_payload import format_sub2api_name, normalize_sub2ap
 from ...database import crud
 from ...database.models import Account, EmailService, Sub2ApiService, TeamInviteTask, TeamTask
 from ...database.session import get_db
+from ...services import EmailServiceFactory, EmailServiceType
 from ...web.task_manager import task_manager
 from .registration import get_proxy_for_registration
+from .registration_selection import RegistrationSelectionRequest, resolve_email_service_for_registration
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 RUNNING_INVITE_STATUSES = {"verifying", "inviting", "accepting", "uploading"}
 CANCELLABLE_INVITE_STATUSES = RUNNING_INVITE_STATUSES | {"pending"}
@@ -281,14 +289,20 @@ def _load_enabled_custom_source_service_types(db) -> List[str]:
     return [service_type for service_type in CUSTOM_DOMAIN_SOURCE_SERVICE_TYPES if service_type in enabled_types]
 
 
-def _resolve_custom_source_account(db, email: Optional[str], service_type: Optional[str]) -> Account:
-    normalized_email = str(email or "").strip().lower()
-    normalized_service_type = str(service_type or "").strip().lower()
-    if not _is_valid_email(normalized_email):
-        raise HTTPException(status_code=400, detail="custom_source_email 格式无效")
-    if normalized_service_type not in CUSTOM_DOMAIN_SOURCE_SERVICE_TYPES:
-        raise HTTPException(status_code=400, detail="custom_source_service_type 不支持当前类型")
+def _find_custom_source_account(db, normalized_email: str) -> Optional[Account]:
+    return (
+        db.query(Account)
+        .filter(func.lower(Account.email) == normalized_email)
+        .order_by(Account.created_at.desc(), Account.id.desc())
+        .first()
+    )
 
+
+def _resolve_custom_source_service(
+    db,
+    normalized_email: str,
+    normalized_service_type: str,
+) -> EmailService:
     target_domain = _extract_email_domain(normalized_email)
     services = (
         db.query(EmailService)
@@ -299,21 +313,473 @@ def _resolve_custom_source_account(db, email: Optional[str], service_type: Optio
         .order_by(EmailService.priority.asc(), EmailService.id.asc())
         .all()
     )
+    if not services:
+        logger.warning(
+            "custom source service unavailable: service_type=%s email=%s",
+            normalized_service_type,
+            normalized_email,
+        )
+        raise HTTPException(status_code=400, detail="当前所选邮箱服务类型没有可用服务")
+        """
+        raise HTTPException(status_code=400, detail="当前所选邮箱服务类型没有可用服务")
+        """
+
     matched_service = next(
         (service for service in services if _extract_email_service_domain(service) == target_domain),
         None,
     )
+    if matched_service:
+        logger.info(
+            "custom source service resolved via exact_match: service_type=%s email=%s service_id=%s domain=%s",
+            normalized_service_type,
+            normalized_email,
+            matched_service.id,
+            target_domain,
+        )
+        return matched_service
+
+    fallback_service = services[0]
+    logger.info(
+        "custom source service resolved via fallback_match: service_type=%s email=%s service_id=%s target_domain=%s",
+        normalized_service_type,
+        normalized_email,
+        fallback_service.id,
+        target_domain,
+    )
+    return fallback_service
+    """
     if not matched_service:
         raise HTTPException(status_code=400, detail="未找到匹配该邮箱域名的已启用邮箱服务")
+    return matched_service
 
-    account = (
-        db.query(Account)
-        .filter(func.lower(Account.email) == normalized_email)
-        .order_by(Account.created_at.desc(), Account.id.desc())
-        .first()
+
+    """
+
+def _bootstrap_custom_source_account(
+    db,
+    *,
+    normalized_email: str,
+    normalized_service_type: str,
+    matched_service: EmailService,
+    proxy_url: Optional[str],
+) -> Account:
+    try:
+        service_type = EmailServiceType(normalized_service_type)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"custom_source_service_type 不支持当前类型: {exc}") from exc
+
+    selection = RegistrationSelectionRequest(
+        selected_email_addresses=[normalized_email],
+        selection_index=0,
     )
+    try:
+        resolved_service = resolve_email_service_for_registration(
+            db=db,
+            service_type=service_type,
+            requested_service_id=matched_service.id,
+            fallback_config=matched_service.config,
+            proxy_url=proxy_url,
+            selection=selection,
+            log_callback=None,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"该自定义主号邮箱暂时无法从邮箱服务直接登录/注册: {exc}") from exc
+
+    email_service = EmailServiceFactory.create(
+        resolved_service.service_type,
+        resolved_service.config,
+        name=resolved_service.service_name,
+    )
+    engine = RegistrationEngine(
+        email_service=email_service,
+        proxy_url=proxy_url,
+    )
+    result = engine.run()
+    if not result.success:
+        raise HTTPException(
+            status_code=400,
+            detail=result.error_message or f"该自定义主号邮箱自动登录/注册失败: {normalized_email}",
+        )
+
+    result_email = str(result.email or normalized_email).strip().lower()
+    if result_email != normalized_email:
+        raise HTTPException(
+            status_code=400,
+            detail=f"自动登录/注册返回的邮箱与目标不一致: 期望 {normalized_email}，实际 {result.email or 'unknown'}",
+        )
+
+    existing_account = _find_custom_source_account(db, normalized_email)
+    email_service_id = engine.email_info.get("service_id") if getattr(engine, "email_info", None) else None
+
+    if existing_account:
+        updates: Dict[str, Any] = {
+            "client_id": get_settings().openai_client_id,
+            "session_token": result.session_token or None,
+            "cookies": result.cookies or None,
+            "email_service": normalized_service_type,
+            "account_id": result.account_id or None,
+            "workspace_id": result.workspace_id or None,
+            "access_token": result.access_token or None,
+            "refresh_token": result.refresh_token or None,
+            "id_token": result.id_token or None,
+            "proxy_used": proxy_url,
+            "extra_data": result.metadata or existing_account.extra_data or {},
+            "remark": existing_account.remark,
+            "status": "active",
+            "source": result.source or "login",
+        }
+        if result.password:
+            updates["password"] = result.password
+        if email_service_id:
+            updates["email_service_id"] = email_service_id
+        refreshed = crud.update_account(db, existing_account.id, **updates)
+        if not refreshed:
+            raise HTTPException(status_code=500, detail="自动补建本地账号失败")
+        return refreshed
+
+    return crud.create_account(
+        db,
+        email=normalized_email,
+        password=result.password or None,
+        client_id=get_settings().openai_client_id,
+        session_token=result.session_token or None,
+        cookies=result.cookies or None,
+        email_service=normalized_service_type,
+        email_service_id=email_service_id,
+        account_id=result.account_id or None,
+        workspace_id=result.workspace_id or None,
+        access_token=result.access_token or None,
+        refresh_token=result.refresh_token or None,
+        id_token=result.id_token or None,
+        proxy_used=proxy_url,
+        extra_data=result.metadata or {},
+        status="active",
+        source=result.source or "login",
+    )
+
+
+def _resolve_custom_source_service(
+    db,
+    normalized_email: str,
+    normalized_service_type: str,
+) -> EmailService:
+    target_domain = _extract_email_domain(normalized_email)
+    services = (
+        db.query(EmailService)
+        .filter(
+            EmailService.enabled.is_(True),
+            EmailService.service_type == normalized_service_type,
+        )
+        .order_by(EmailService.priority.asc(), EmailService.id.asc())
+        .all()
+    )
+    if not services:
+        logger.warning(
+            "custom source service unavailable: service_type=%s email=%s",
+            normalized_service_type,
+            normalized_email,
+        )
+        raise HTTPException(status_code=400, detail="当前所选邮箱服务类型没有可用服务")
+
+    matched_service = next(
+        (service for service in services if _extract_email_service_domain(service) == target_domain),
+        None,
+    )
+    if matched_service:
+        logger.info(
+            "custom source service resolved via exact_match: service_type=%s email=%s service_id=%s domain=%s",
+            normalized_service_type,
+            normalized_email,
+            matched_service.id,
+            target_domain,
+        )
+        return matched_service
+
+    fallback_service = services[0]
+    logger.info(
+        "custom source service resolved via fallback_match: service_type=%s email=%s service_id=%s target_domain=%s",
+        normalized_service_type,
+        normalized_email,
+        fallback_service.id,
+        target_domain,
+    )
+    return fallback_service
+
+
+def _upsert_bootstrapped_custom_source_account(
+    db,
+    *,
+    existing_account: Optional[Account],
+    normalized_email: str,
+    normalized_service_type: str,
+    proxy_url: Optional[str],
+    result_payload: Dict[str, Any],
+    email_service_id: Optional[str],
+) -> Account:
+    result_email = str(result_payload.get("email") or normalized_email).strip().lower()
+    if result_email != normalized_email:
+        raise HTTPException(
+            status_code=400,
+            detail=f"自动登录/注册返回的邮箱与目标不一致: 期望 {normalized_email}，实际 {result_payload.get('email') or 'unknown'}",
+        )
+
+    metadata = result_payload.get("metadata")
+    common_updates: Dict[str, Any] = {
+        "client_id": get_settings().openai_client_id,
+        "session_token": result_payload.get("session_token") or None,
+        "cookies": result_payload.get("cookies") or None,
+        "email_service": normalized_service_type,
+        "account_id": result_payload.get("account_id") or None,
+        "workspace_id": result_payload.get("workspace_id") or None,
+        "access_token": result_payload.get("access_token") or None,
+        "refresh_token": result_payload.get("refresh_token") or None,
+        "id_token": result_payload.get("id_token") or None,
+        "proxy_used": proxy_url,
+        "status": "active",
+        "source": result_payload.get("source") or "login",
+    }
+    if email_service_id:
+        common_updates["email_service_id"] = email_service_id
+
+    if existing_account:
+        updates = dict(common_updates)
+        updates["extra_data"] = metadata or existing_account.extra_data or {}
+        updates["remark"] = existing_account.remark
+        if result_payload.get("password"):
+            updates["password"] = result_payload.get("password")
+        for key, value in updates.items():
+            if value is not None and hasattr(existing_account, key):
+                setattr(existing_account, key, value)
+        db.commit()
+        db.refresh(existing_account)
+        return existing_account
+
+    return crud.create_account(
+        db,
+        email=normalized_email,
+        password=result_payload.get("password") or None,
+        client_id=get_settings().openai_client_id,
+        session_token=result_payload.get("session_token") or None,
+        cookies=result_payload.get("cookies") or None,
+        email_service=normalized_service_type,
+        email_service_id=email_service_id,
+        account_id=result_payload.get("account_id") or None,
+        workspace_id=result_payload.get("workspace_id") or None,
+        access_token=result_payload.get("access_token") or None,
+        refresh_token=result_payload.get("refresh_token") or None,
+        id_token=result_payload.get("id_token") or None,
+        proxy_used=proxy_url,
+        extra_data=metadata or {},
+        status="active",
+        source=result_payload.get("source") or "login",
+    )
+
+
+def _attempt_custom_source_login_probe(
+    *,
+    email_service,
+    normalized_email: str,
+    normalized_service_type: str,
+    proxy_url: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    engine = RegistrationEngine(
+        email_service=email_service,
+        proxy_url=proxy_url,
+    )
+    if not engine._create_email():
+        raise HTTPException(status_code=400, detail=f"该自定义主号邮箱无法复用邮箱服务: {normalized_email}")
+
+    did, sen_token = engine._prepare_authorize_flow("自定义主号登录探测")
+    if not did:
+        raise HTTPException(status_code=400, detail=f"自定义主号登录探测获取 Device ID 失败: {normalized_email}")
+    if not sen_token:
+        raise HTTPException(status_code=400, detail=f"自定义主号登录探测 Sentinel 验证失败: {normalized_email}")
+
+    login_start_result = engine._submit_login_start(did, sen_token)
+    if not login_start_result.success:
+        raise HTTPException(
+            status_code=400,
+            detail=login_start_result.error_message or f"自定义主号提交登录入口失败: {normalized_email}",
+        )
+
+    page_type = str(login_start_result.page_type or "").strip()
+    if page_type == OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]:
+        engine._is_existing_account = True
+        result = RegistrationResult(success=False, email=engine.email or normalized_email, logs=engine.logs)
+        if not engine._complete_token_exchange(result):
+            raise HTTPException(
+                status_code=400,
+                detail=result.error_message or f"该自定义主号邮箱自动登录失败: {normalized_email}",
+            )
+        return {
+            "email": result.email or normalized_email,
+            "password": None,
+            "session_token": result.session_token or None,
+            "cookies": result.cookies or None,
+            "account_id": result.account_id or None,
+            "workspace_id": result.workspace_id or None,
+            "access_token": result.access_token or None,
+            "refresh_token": result.refresh_token or None,
+            "id_token": result.id_token or None,
+            "metadata": result.metadata or {},
+            "source": result.source or "login",
+            "email_service_id": engine.email_info.get("service_id") if getattr(engine, "email_info", None) else None,
+        }
+
+    if page_type == OPENAI_PAGE_TYPES["LOGIN_PASSWORD"]:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"该邮箱已进入密码登录页，说明它是已注册账号；"
+                f"当前本地没有保存这个 OpenAI 密码，无法自动登录刷新身份: {normalized_email}"
+            ),
+        )
+
+    return None
+
+
+def _bootstrap_custom_source_account(
+    db,
+    *,
+    normalized_email: str,
+    normalized_service_type: str,
+    matched_service: EmailService,
+    proxy_url: Optional[str],
+) -> Account:
+    try:
+        service_type = EmailServiceType(normalized_service_type)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"custom_source_service_type 不支持当前类型: {exc}") from exc
+
+    selection = RegistrationSelectionRequest(
+        selected_email_addresses=[normalized_email],
+        selection_index=0,
+    )
+    try:
+        resolved_service = resolve_email_service_for_registration(
+            db=db,
+            service_type=service_type,
+            requested_service_id=matched_service.id,
+            fallback_config=matched_service.config,
+            proxy_url=proxy_url,
+            selection=selection,
+            log_callback=None,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"该自定义主号邮箱暂时无法从邮箱服务直接登录/注册: {exc}") from exc
+
+    existing_account = _find_custom_source_account(db, normalized_email)
+    if existing_account and str(existing_account.password or "").strip():
+        logger.info(
+            "custom source bootstrap using local password login refresh: email=%s account_id=%s",
+            normalized_email,
+            existing_account.id,
+        )
+        recovery = recover_account_session_via_login(existing_account, proxy_url=proxy_url)
+        if recovery.get("success"):
+            return _upsert_bootstrapped_custom_source_account(
+                db,
+                existing_account=existing_account,
+                normalized_email=normalized_email,
+                normalized_service_type=normalized_service_type,
+                proxy_url=proxy_url,
+                result_payload={
+                    **recovery,
+                    "email": recovery.get("email") or normalized_email,
+                    "password": existing_account.password,
+                    "metadata": existing_account.extra_data or {},
+                },
+                email_service_id=recovery.get("email_service_id") or existing_account.email_service_id,
+            )
+        logger.warning(
+            "custom source local password login refresh failed, falling back to generic bootstrap: email=%s error=%s",
+            normalized_email,
+            recovery.get("error"),
+        )
+
+    email_service = EmailServiceFactory.create(
+        resolved_service.service_type,
+        resolved_service.config,
+        name=resolved_service.service_name,
+    )
+
+    if not existing_account:
+        probed_login = _attempt_custom_source_login_probe(
+            email_service=email_service,
+            normalized_email=normalized_email,
+            normalized_service_type=normalized_service_type,
+            proxy_url=proxy_url,
+        )
+        if probed_login:
+            return _upsert_bootstrapped_custom_source_account(
+                db,
+                existing_account=None,
+                normalized_email=normalized_email,
+                normalized_service_type=normalized_service_type,
+                proxy_url=proxy_url,
+                result_payload=probed_login,
+                email_service_id=probed_login.get("email_service_id"),
+            )
+
+    engine = RegistrationEngine(
+        email_service=email_service,
+        proxy_url=proxy_url,
+    )
+    result = engine.run()
+    if not result.success:
+        raise HTTPException(
+            status_code=400,
+            detail=result.error_message or f"该自定义主号邮箱自动登录/注册失败: {normalized_email}",
+        )
+
+    email_service_id = engine.email_info.get("service_id") if getattr(engine, "email_info", None) else None
+    return _upsert_bootstrapped_custom_source_account(
+        db,
+        existing_account=existing_account,
+        normalized_email=normalized_email,
+        normalized_service_type=normalized_service_type,
+        proxy_url=proxy_url,
+        result_payload={
+            "email": result.email or normalized_email,
+            "password": result.password or None,
+            "session_token": result.session_token or None,
+            "cookies": result.cookies or None,
+            "account_id": result.account_id or None,
+            "workspace_id": result.workspace_id or None,
+            "access_token": result.access_token or None,
+            "refresh_token": result.refresh_token or None,
+            "id_token": result.id_token or None,
+            "metadata": result.metadata or {},
+            "source": result.source or "login",
+        },
+        email_service_id=email_service_id,
+    )
+
+
+def _resolve_custom_source_account(
+    db,
+    email: Optional[str],
+    service_type: Optional[str],
+    *,
+    proxy_url: Optional[str] = None,
+) -> Account:
+    normalized_email = str(email or "").strip().lower()
+    normalized_service_type = str(service_type or "").strip().lower()
+    if not _is_valid_email(normalized_email):
+        raise HTTPException(status_code=400, detail="custom_source_email 格式无效")
+    if normalized_service_type not in CUSTOM_DOMAIN_SOURCE_SERVICE_TYPES:
+        raise HTTPException(status_code=400, detail="custom_source_service_type 不支持当前类型")
+
+    matched_service = _resolve_custom_source_service(db, normalized_email, normalized_service_type)
+    account = _find_custom_source_account(db, normalized_email)
     if not account:
-        raise HTTPException(status_code=400, detail="该自定义主号邮箱尚未存在于账号管理中")
+        return _bootstrap_custom_source_account(
+            db,
+            normalized_email=normalized_email,
+            normalized_service_type=normalized_service_type,
+            matched_service=matched_service,
+            proxy_url=proxy_url,
+        )
     if str(account.email_service or "").strip().lower() != normalized_service_type:
         raise HTTPException(status_code=400, detail="该邮箱已存在本地账号，但邮箱服务类型与当前选择不一致")
     return account
@@ -568,7 +1034,7 @@ async def get_team_invite_sources(
 async def create_team_invite_task(request: TeamInviteCreateRequest, background_tasks: BackgroundTasks):
     with get_db() as db:
         if request.source_mode not in {"account", "team_task", "custom_domain_email"}:
-            raise HTTPException(status_code=400, detail="source_mode 必须是 account 或 team_task")
+            raise HTTPException(status_code=400, detail="source_mode 必须是 account、team_task 或 custom_domain_email")
 
         source_team_task = None
         if request.source_mode == "account":
@@ -589,10 +1055,12 @@ async def create_team_invite_task(request: TeamInviteCreateRequest, background_t
                 raise HTTPException(status_code=404, detail="源 Team 主账号不存在")
 
         else:
+            bootstrap_proxy = _resolve_effective_proxy(db, request.proxy, None, None)
             source_account = _resolve_custom_source_account(
                 db,
                 request.custom_source_email,
                 request.custom_source_service_type,
+                proxy_url=bootstrap_proxy,
             )
             source_team_task = _resolve_source_team_task_for_account(db, source_account)
 

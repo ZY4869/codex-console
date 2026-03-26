@@ -14,6 +14,11 @@ from curl_cffi import CurlMime
 from ...database.session import get_db
 from ...database.models import Account
 from ...config.settings import get_settings
+from .platform_upload_dedupe import (
+    build_platform_duplicate_detail,
+    load_platform_upload_record,
+    save_platform_upload_record,
+)
 from .team_upload_guard import (
     enrich_team_upload_error_detail,
     evaluate_team_upload_guard,
@@ -91,6 +96,98 @@ def _post_cpa_auth_file_raw_json(upload_url: str, filename: str, file_content: b
         proxies=None,
         timeout=30,
         impersonate="chrome110",
+    )
+
+
+def _extract_cpa_filenames(payload) -> Optional[set[str]]:
+    if isinstance(payload, dict):
+        for key in ("files", "data", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return _extract_cpa_filenames(value)
+        return None
+    if not isinstance(payload, list):
+        return None
+
+    filenames: set[str] = set()
+    for item in payload:
+        if isinstance(item, str):
+            name = item.strip()
+        elif isinstance(item, dict):
+            name = str(item.get("name") or item.get("filename") or "").strip()
+        else:
+            continue
+        if name:
+            filenames.add(name)
+    return filenames
+
+
+def _fetch_cpa_remote_filenames(upload_url: str, api_token: str) -> Optional[set[str]]:
+    try:
+        response = cffi_requests.get(
+            upload_url,
+            headers=_build_cpa_headers(api_token),
+            proxies=None,
+            timeout=15,
+            impersonate="chrome110",
+        )
+    except Exception as exc:
+        logger.warning("CPA duplicate precheck failed while loading auth-files: %s", exc)
+        return None
+
+    if response.status_code != 200:
+        logger.info("CPA duplicate precheck skipped because auth-files returned status %s", response.status_code)
+        return None
+
+    try:
+        payload = response.json()
+    except Exception as exc:
+        logger.warning("CPA duplicate precheck skipped because auth-files response is not JSON: %s", exc)
+        return None
+
+    filenames = _extract_cpa_filenames(payload)
+    if filenames is None:
+        logger.warning("CPA duplicate precheck skipped because auth-files response shape is unsupported")
+    return filenames
+
+
+def _resolve_cpa_duplicate_detail(
+    account: Account,
+    *,
+    api_url: Optional[str],
+    api_token: Optional[str],
+    service_id: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    upload_url = _normalize_cpa_auth_files_url(api_url or "")
+    filename = f"{account.email}.json"
+
+    if upload_url and api_token:
+        remote_filenames = _fetch_cpa_remote_filenames(upload_url, api_token)
+        if remote_filenames is not None:
+            if filename in remote_filenames:
+                return build_platform_duplicate_detail(
+                    account,
+                    source="remote",
+                    message="CPA 已存在该账号，已跳过",
+                    extra={"filename": filename},
+                )
+            return None
+
+    record = load_platform_upload_record(
+        account,
+        "cpa",
+        service_id=service_id,
+        api_url=upload_url,
+        url_normalizer=_normalize_cpa_auth_files_url,
+    )
+    if not record:
+        return None
+
+    return build_platform_duplicate_detail(
+        account,
+        source="local_record",
+        message="CPA 已存在本地上传记录，已跳过",
+        extra={"filename": record.get("filename") or filename},
     )
 
 
@@ -196,6 +293,7 @@ def batch_upload_to_cpa(
     api_token: str = None,
     team_context: Optional[Dict[str, Any]] = None,
     service_id: Optional[int] = None,
+    dedupe: bool = False,
 ) -> dict:
     """
     批量上传账号到 CPA 管理平台
@@ -216,6 +314,9 @@ def batch_upload_to_cpa(
         "details": [],
         "team_context": team_context,
     }
+    settings = get_settings()
+    effective_url = api_url or settings.cpa_api_url
+    effective_token = api_token or (settings.cpa_api_token.get_secret_value() if settings.cpa_api_token else "")
 
     with get_db() as db:
         uploadable_accounts: List[Account] = []
@@ -258,6 +359,18 @@ def batch_upload_to_cpa(
             results["details"].extend(blocked_details)
 
         for account in guard_result.get("allowed_accounts") or []:
+            if dedupe and not team_context:
+                duplicate_detail = _resolve_cpa_duplicate_detail(
+                    account,
+                    api_url=effective_url,
+                    api_token=effective_token,
+                    service_id=service_id,
+                )
+                if duplicate_detail:
+                    results["skipped_count"] += 1
+                    results["details"].append(duplicate_detail)
+                    continue
+
             # 生成 Token JSON
             token_data = generate_token_json(account, team_context=team_context)
 
@@ -275,6 +388,16 @@ def batch_upload_to_cpa(
                 account.cpa_uploaded = True
                 account.cpa_uploaded_at = datetime.utcnow()
                 db.commit()
+                if dedupe and not team_context:
+                    save_platform_upload_record(
+                        db,
+                        account,
+                        "cpa",
+                        service_id=service_id,
+                        api_url=effective_url,
+                        url_normalizer=_normalize_cpa_auth_files_url,
+                        metadata={"filename": f"{account.email}.json"},
+                    )
                 record_team_upload_success(
                     db,
                     account,

@@ -144,6 +144,10 @@ class RegistrationEngine:
         self._target_workspace_id: Optional[str] = None  # 指定目标 workspace（用于 Team 直接选择）
         self._token_acquisition_requires_login: bool = False  # 新注册账号需要二次登录拿 token
 
+        self._password_generated_for_registration: bool = False
+        self._registration_conflict_detected: bool = False
+        self._registration_conflict_message: str = ""
+
     def _log(self, message: str, level: str = "info"):
         """记录日志"""
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -405,6 +409,15 @@ class RegistrationEngine:
         error = payload.get("error") or {}
         return str(error.get("code") or "").strip(), str(error.get("message") or "").strip()
 
+    def _is_existing_account_registration_conflict(self, error_code: str, error_message: str) -> bool:
+        message = str(error_message or "").strip().lower()
+        code = str(error_code or "").strip().lower()
+        if code == "user_exists":
+            return True
+        if "already" in message or "exists" in message:
+            return True
+        return "failed to register username" in message
+
     def _submit_signup_form(
         self,
         did: str,
@@ -612,6 +625,46 @@ class RegistrationEngine:
         if not password_result.is_existing_account:
             return False, f"重新登录未进入验证码页面: {password_result.page_type or 'unknown'}"
         return True, ""
+
+    def _recover_after_registration_conflict(self) -> Tuple[bool, str]:
+        """注册密码阶段疑似撞到已存在账号时，切换到登录流程兜底。"""
+        conflict_detected = self._registration_conflict_detected
+        if not conflict_detected:
+            for line in reversed(self.logs[-6:]):
+                if self._is_existing_account_registration_conflict("", line):
+                    conflict_detected = True
+                    self._registration_conflict_message = self._registration_conflict_message or line
+                    break
+        if not conflict_detected:
+            return False, ""
+
+        self._registration_conflict_detected = True
+        self._log("检测到邮箱可能已存在账号，改走邮箱登录刷新身份", "warning")
+        self._reset_auth_flow()
+
+        did, sen_token = self._prepare_authorize_flow("注册冲突后切换登录")
+        if not did:
+            return False, "注册冲突后切换登录时获取 Device ID 失败"
+        if not sen_token:
+            return False, "注册冲突后切换登录时 Sentinel POW 验证失败"
+
+        login_start_result = self._submit_login_start(did, sen_token)
+        if not login_start_result.success:
+            return False, f"注册冲突后提交登录入口失败: {login_start_result.error_message}"
+
+        if login_start_result.page_type == OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]:
+            self._is_existing_account = True
+            self._otp_sent_at = time.time()
+            self.password = None
+            self._password_generated_for_registration = False
+            self._log("登录入口直接进入邮箱验证码页，继续通过邮箱验证码刷新身份")
+            return True, ""
+
+        if login_start_result.page_type != OPENAI_PAGE_TYPES["LOGIN_PASSWORD"]:
+            return False, f"注册冲突后未进入可用的登录页面: {login_start_result.page_type or 'unknown'}"
+
+        detail = self._registration_conflict_message or "该邮箱疑似已在 OpenAI 注册"
+        return False, f"{detail}；当前本地没有可用密码，无法自动完成邮箱登录"
 
     def _register_password(self) -> Tuple[bool, Optional[str]]:
         """注册密码"""
@@ -942,6 +995,9 @@ class RegistrationEngine:
             self._is_existing_account = False
             self._token_acquisition_requires_login = False
             self._otp_sent_at = None
+            self._password_generated_for_registration = False
+            self._registration_conflict_detected = False
+            self._registration_conflict_message = ""
 
             self._log("=" * 60)
             self._log("注册流程启动，开始替你敲门")
@@ -986,6 +1042,34 @@ class RegistrationEngine:
             else:
                 self._log("5. 设置密码，别让小偷偷笑...")
                 password_ok, _ = self._register_password()
+                if not password_ok:
+                    recovered_existing, recovery_error = self._recover_after_registration_conflict()
+                    if recovered_existing:
+                        password_ok = True
+                    else:
+                        result.error_message = recovery_error or "娉ㄥ唽瀵嗙爜澶辫触"
+                        return result
+
+                if self._is_existing_account:
+                    if not self._complete_token_exchange(result):
+                        return result
+
+                    self._log("=" * 60)
+                    self._log("鐧诲綍鎴愬姛锛岃€佹湅鍙嬮『鍒╁洖瀹?")
+                    self._log(f"閭: {result.email}")
+                    self._log(f"Account ID: {result.account_id}")
+                    self._log(f"Workspace ID: {result.workspace_id}")
+                    self._log("=" * 60)
+
+                    result.success = True
+                    result.metadata = {
+                        "email_service": self.email_service.service_type.value,
+                        "proxy_used": self.proxy_url,
+                        "registered_at": datetime.now().isoformat(),
+                        "is_existing_account": self._is_existing_account,
+                        "token_acquired_via_relogin": self._token_acquisition_requires_login,
+                    }
+                    return result
                 if not password_ok:
                     result.error_message = "注册密码失败"
                     return result

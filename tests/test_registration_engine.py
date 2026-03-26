@@ -359,6 +359,66 @@ def test_existing_account_login_uses_auto_sent_otp_without_manual_send():
     assert result.metadata["token_acquired_via_relogin"] is False
 
 
+def test_run_falls_back_to_email_login_when_register_username_conflicts():
+    session_one = QueueSession([
+        ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["signup"],
+            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]}}),
+        ),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["register"],
+            DummyResponse(
+                status_code=400,
+                payload={
+                    "error": {
+                        "message": "Failed to register username. Please try again.",
+                        "code": "bad_request",
+                    }
+                },
+                text='{"error":{"message":"Failed to register username. Please try again.","code":"bad_request"}}',
+            ),
+        ),
+    ])
+    session_two = QueueSession([
+        ("GET", "https://auth.example.test/flow/2", _response_with_did("did-2")),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["signup"],
+            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]}}),
+        ),
+        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], _response_with_login_cookies("ws-existing", "session-existing")),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["select_workspace"],
+            DummyResponse(payload={"continue_url": "https://auth.example.test/continue-existing"}),
+        ),
+        (
+            "GET",
+            "https://auth.example.test/continue-existing",
+            DummyResponse(
+                status_code=302,
+                headers={"Location": "http://localhost:1455/auth/callback?code=code-1&state=state-1"},
+            ),
+        ),
+    ])
+
+    email_service = FakeEmailService(["246810"])
+    engine = RegistrationEngine(email_service)
+    engine.http_client = FakeOpenAIClient([session_one, session_two], ["sentinel-1", "sentinel-2"])
+    engine.oauth_manager = FakeOAuthManager()
+
+    result = engine.run()
+
+    assert result.success is True
+    assert result.source == "login"
+    assert result.password == ""
+    assert result.session_token == "session-existing"
+    assert len(email_service.otp_requests) == 1
+
+
 def test_submit_signup_retries_when_auth_step_is_invalid():
     stale_session = QueueSession([
         (

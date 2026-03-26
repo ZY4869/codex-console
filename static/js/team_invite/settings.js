@@ -146,25 +146,7 @@
     }
 
     function renderExistingAccounts(selectedAccountIds) {
-        const selectedSourceAccount = app.getSelectedSourceAccount();
-        const sourceTask = app.getSelectedSourceTask();
-        const excludedIds = new Set();
-        const excludedEmails = new Set();
-
-        if (selectedSourceAccount) {
-            excludedIds.add(String(selectedSourceAccount.id));
-            excludedEmails.add(String(selectedSourceAccount.email || '').toLowerCase());
-        }
-
-        (sourceTask?.members || []).forEach((member) => {
-            excludedIds.add(String(member.id));
-            excludedEmails.add(String(member.email || '').toLowerCase());
-        });
-
-        const availableAccounts = state.sources.accounts.filter((account) => {
-            const email = String(account.email || '').toLowerCase();
-            return !excludedIds.has(String(account.id)) && !excludedEmails.has(email);
-        });
+        const { selectedSourceAccount, availableAccounts } = getExistingAccountContext();
 
         app.fillSelect(
             elements.existingAccountIds,
@@ -178,6 +160,146 @@
                 selectedValues: selectedAccountIds || [],
             },
         );
+    }
+
+    function getExistingAccountContext() {
+        const selectedSourceAccount = app.getSelectedSourceAccount();
+        const sourceTask = app.getSelectedSourceTask();
+        const customSelection = app.getCustomSourceSelection();
+        const excludedIds = new Set();
+        const excludedEmails = new Set();
+
+        if (selectedSourceAccount) {
+            excludedIds.add(String(selectedSourceAccount.id));
+            excludedEmails.add(String(selectedSourceAccount.email || '').toLowerCase());
+        } else if (app.getSelectedSourceMode() === 'custom_domain_email' && customSelection.email) {
+            excludedEmails.add(customSelection.email);
+            if (customSelection.conflictingAccount?.id) {
+                excludedIds.add(String(customSelection.conflictingAccount.id));
+            }
+        }
+
+        (sourceTask?.members || []).forEach((member) => {
+            excludedIds.add(String(member.id));
+            excludedEmails.add(String(member.email || '').toLowerCase());
+        });
+
+        const availableAccounts = state.sources.accounts.filter((account) => {
+            const email = String(account.email || '').toLowerCase();
+            return !excludedIds.has(String(account.id)) && !excludedEmails.has(email);
+        });
+
+        return {
+            selectedSourceAccount,
+            sourceTask,
+            excludedIds,
+            excludedEmails,
+            availableAccounts,
+        };
+    }
+
+    function sanitizeMemberDraft(draft) {
+        const { excludedEmails, availableAccounts } = getExistingAccountContext();
+        const allowedAccountIds = new Set(availableAccounts.map((account) => String(account.id)));
+        const existingAccountIds = Array.from(new Set(
+            (Array.isArray(draft?.existing_account_ids) ? draft.existing_account_ids : [])
+                .map((value) => String(app.parseInteger(value, 0)))
+                .filter((value) => value !== '0' && allowedAccountIds.has(value))
+        ));
+
+        const selectedAccountEmails = new Set(
+            availableAccounts
+                .filter((account) => existingAccountIds.includes(String(account.id)))
+                .map((account) => String(account.email || '').toLowerCase())
+        );
+        const seenManualEmails = new Set();
+        const manualEmails = [];
+        (Array.isArray(draft?.manual_emails) ? draft.manual_emails : []).forEach((value) => {
+            const normalizedEmail = app.normalizeEmail(value);
+            if (
+                !normalizedEmail
+                || excludedEmails.has(normalizedEmail)
+                || selectedAccountEmails.has(normalizedEmail)
+                || seenManualEmails.has(normalizedEmail)
+            ) {
+                return;
+            }
+            seenManualEmails.add(normalizedEmail);
+            manualEmails.push(normalizedEmail);
+        });
+
+        return {
+            existing_account_ids: existingAccountIds,
+            manual_emails: manualEmails,
+        };
+    }
+
+    function collectCurrentMemberDraft() {
+        return sanitizeMemberDraft({
+            existing_account_ids: app.getSelectedValues(elements.existingAccountIds),
+            manual_emails: getSelectedManualEmails(),
+        });
+    }
+
+    function buildMemberDraftFromTask(task) {
+        return {
+            existing_account_ids: (task?.members || [])
+                .filter((member) => member.source_type === 'account' && member.account_id)
+                .map((member) => String(member.account_id)),
+            manual_emails: (task?.members || [])
+                .filter((member) => member.source_type === 'manual')
+                .map((member) => member.email),
+        };
+    }
+
+    function upsertSourceAccountInState(account) {
+        if (!account?.id) {
+            return;
+        }
+        const accountId = String(account.id);
+        const nextAccounts = Array.isArray(state.sources.accounts) ? [...state.sources.accounts] : [];
+        const accountIndex = nextAccounts.findIndex((item) => String(item.id) === accountId);
+        if (accountIndex >= 0) {
+            nextAccounts[accountIndex] = { ...nextAccounts[accountIndex], ...account };
+        } else {
+            nextAccounts.unshift(account);
+        }
+        state.sources.accounts = nextAccounts;
+    }
+
+    function applyMemberDraft(draft, { persist = false } = {}) {
+        const normalizedDraft = sanitizeMemberDraft(draft);
+        renderExistingAccounts(normalizedDraft.existing_account_ids);
+        elements.manualEmails.value = normalizedDraft.manual_emails.join('\n');
+        if (persist) {
+            const draftKey = app.getCurrentMemberDraftKey();
+            if (draftKey) {
+                app.setMemberDraft(draftKey, normalizedDraft);
+            }
+        }
+        return normalizedDraft;
+    }
+
+    function syncCurrentMemberDraft(overrides = null) {
+        const normalizedDraft = sanitizeMemberDraft(overrides || collectCurrentMemberDraft());
+        const draftKey = app.getCurrentMemberDraftKey();
+        if (draftKey) {
+            app.setMemberDraft(draftKey, normalizedDraft);
+        }
+        return normalizedDraft;
+    }
+
+    function restoreCurrentMemberDraft(options = {}) {
+        const draftKey = app.getCurrentMemberDraftKey();
+        const fallbackDraft = {
+            existing_account_ids: options.fallbackSelectedAccountIds || [],
+            manual_emails: options.fallbackManualEmails || [],
+        };
+        if (!draftKey) {
+            return applyMemberDraft({ existing_account_ids: [], manual_emails: [] });
+        }
+        const savedDraft = app.getMemberDraft(draftKey);
+        return applyMemberDraft(savedDraft || fallbackDraft, { persist: true });
     }
 
     function buildAccountOptionLabel(account, workspaceName = '') {
@@ -225,7 +347,7 @@
             if (!customSelection.email) {
                 elements.sourceSummary.innerHTML = `
                     <h5>自定义主号</h5>
-                    <p>输入自定义域名邮箱并选择邮箱服务类型后，这里会显示本地账号匹配结果。</p>
+                    <p>输入自定义域名邮箱并选择邮箱服务类型后，这里会显示本地账号匹配结果，或提示是否会自动补建本地账号。</p>
                 `;
                 return;
             }
@@ -243,7 +365,7 @@
                     <p>
                         ${conflictingAccount
                             ? `本地已找到邮箱相同的账号，但其来源服务是 ${app.escapeHtml(app.formatEmailServiceType(conflictingAccount.email_service))}，与当前选择的 ${app.escapeHtml(app.formatEmailServiceType(customSelection.serviceType))} 不一致。`
-                            : '当前还没有匹配到可用的本地账号。请先把这个邮箱对应的账号准备到账号管理中。'}
+                            : '当前还没有匹配到可用的本地账号。创建任务时会先尝试通过注册/登录流程获取账号身份，并自动写入账号管理。'}
                     </p>
                 `;
                 return;
@@ -297,25 +419,7 @@
     }
 
     function renderExistingAccounts(selectedAccountIds) {
-        const selectedSourceAccount = app.getSelectedSourceAccount();
-        const sourceTask = app.getSelectedSourceTask();
-        const excludedIds = new Set();
-        const excludedEmails = new Set();
-
-        if (selectedSourceAccount) {
-            excludedIds.add(String(selectedSourceAccount.id));
-            excludedEmails.add(String(selectedSourceAccount.email || '').toLowerCase());
-        }
-
-        (sourceTask?.members || []).forEach((member) => {
-            excludedIds.add(String(member.id));
-            excludedEmails.add(String(member.email || '').toLowerCase());
-        });
-
-        const availableAccounts = state.sources.accounts.filter((account) => {
-            const email = String(account.email || '').toLowerCase();
-            return !excludedIds.has(String(account.id)) && !excludedEmails.has(email);
-        });
+        const { selectedSourceAccount, availableAccounts } = getExistingAccountContext();
 
         app.fillSelect(
             elements.existingAccountIds,
@@ -518,14 +622,57 @@
     }
 
     function updateCustomSummary() {
+        const memberDraft = collectCurrentMemberDraft();
+        elements.customAccountCount.textContent = String(
+            memberDraft.existing_account_ids.length + memberDraft.manual_emails.length
+        ) + ' 个补充账号';
+        return;
+        /*
+        elements.customAccountCount.textContent = `${memberDraft.existing_account_ids.length + memberDraft.manual_emails.length} 涓ˉ鍏呰处鍙穈;
+        return;
+        /*
         const customAccounts = getSelectedCustomAccounts();
         const manualEmails = getSelectedManualEmails();
         elements.customAccountCount.textContent = `${customAccounts.length + manualEmails.length} 个补充账号`;
+        */
     }
 
     function updateCapacityWarning() {
         const sourceTask = app.getSelectedSourceTask();
         const baseCount = sourceTask?.member_count || (app.getSelectedSourceAccount() ? 1 : 0);
+        const memberDraft = collectCurrentMemberDraft();
+        const totalCount = baseCount + memberDraft.existing_account_ids.length + memberDraft.manual_emails.length;
+        if (!baseCount) {
+            elements.capacityWarning.classList.remove('show');
+            elements.capacityWarning.textContent = '';
+            return;
+        }
+
+        if (totalCount > 5) {
+            elements.capacityWarning.textContent = '当前 Team 预计总人数 ' + totalCount + ' 人，已超过 5 人。本次只提示，不阻断开始。';
+            elements.capacityWarning.classList.add('show');
+            return;
+        }
+
+        elements.capacityWarning.classList.remove('show');
+        elements.capacityWarning.textContent = '';
+        return;
+        /*
+        if (!baseCount) {
+            elements.capacityWarning.classList.remove('show');
+            elements.capacityWarning.textContent = '';
+            return;
+        }
+
+        if (totalCount > 5) {
+            elements.capacityWarning.textContent = `褰撳墠 Team 棰勮鎬讳汉鏁?${totalCount} 浜猴紝宸茶秴杩?5 浜虹┖闂淬€傛湰娆″彧鎻愮ず锛屼笉闃绘柇寮€濮嬨€俙;
+            elements.capacityWarning.classList.add('show');
+            return;
+        }
+
+        elements.capacityWarning.classList.remove('show');
+        elements.capacityWarning.textContent = '';
+        return;
         const manualEmails = getSelectedManualEmails();
         const selectedCustomCount = getSelectedCustomAccounts().length;
         const totalCount = baseCount + selectedCustomCount + manualEmails.length;
@@ -544,6 +691,7 @@
 
         elements.capacityWarning.classList.remove('show');
         elements.capacityWarning.textContent = '';
+        */
     }
 
     function notifyPreviewChanged(forcePreview) {
@@ -601,6 +749,7 @@
         const selectedValues = new Set(app.getSelectedValues(elements.existingAccountIds));
         selectedValues.add(String(matched.id));
         renderExistingAccounts(Array.from(selectedValues));
+        syncCurrentMemberDraft();
         notifyPreviewChanged(false);
     }
 
@@ -945,6 +1094,7 @@
     async function loadSources(options = {}) {
         const selectedSourceAccountId = options.selectedSourceAccountId || elements.sourceAccountId.value;
         const selectedAccountIds = options.selectedAccountIds || app.getSelectedValues(elements.existingAccountIds);
+        const fallbackManualEmails = options.manualEmails || getSelectedManualEmails();
         const selectedCustomSourceType = options.selectedCustomSourceType || elements.customSourceServiceType.value;
 
         const response = await app.api.loadSources();
@@ -959,7 +1109,10 @@
         renderSourceMode();
         renderSourceAccounts(selectedSourceAccountId);
         renderSourceSummary();
-        renderExistingAccounts(selectedAccountIds);
+        restoreCurrentMemberDraft({
+            fallbackSelectedAccountIds: selectedAccountIds,
+            fallbackManualEmails,
+        });
         updateCustomSummary();
         updateCapacityWarning();
     }
@@ -973,7 +1126,9 @@
         const customSourceServiceType = sourceMode === 'custom_domain_email'
             ? String(task.source_account?.email_service || '')
             : elements.customSourceServiceType.value;
+        const taskMemberDraft = buildMemberDraftFromTask(task);
 
+        upsertSourceAccountInState(task.source_account);
         elements.sourceMode.value = sourceMode;
         elements.customSourceEmail.value = customSourceEmail;
         renderCustomSourceServiceTypes(customSourceServiceType);
@@ -982,16 +1137,7 @@
         renderSourceAccounts(sourceAccountId);
         elements.sourceAccountId.value = sourceMode === 'account' ? sourceAccountId : '';
         renderSourceSummary();
-
-        const selectedCustomIds = (task.members || [])
-            .filter((member) => member.source_type === 'account' && member.account_id)
-            .map((member) => String(member.account_id));
-        renderExistingAccounts(selectedCustomIds);
-
-        elements.manualEmails.value = (task.members || [])
-            .filter((member) => member.source_type === 'manual')
-            .map((member) => member.email)
-            .join('\n');
+        applyMemberDraft(taskMemberDraft, { persist: true });
 
         elements.taskProxy.value = task.proxy || '';
         elements.retryLimit.value = String(task.retry_limit ?? task.upload_config?.retry_limit ?? 0);
@@ -1030,14 +1176,15 @@
         const sourceMode = app.getSelectedSourceMode();
         const sourceAccountId = app.parseInteger(elements.sourceAccountId.value, 0);
         const customSelection = app.getCustomSourceSelection();
+        const memberDraft = syncCurrentMemberDraft();
         return {
             source_mode: sourceMode,
             source_account_id: sourceMode === 'account' ? (sourceAccountId || null) : null,
             custom_source_email: sourceMode === 'custom_domain_email' ? (customSelection.email || null) : null,
             custom_source_service_type: sourceMode === 'custom_domain_email' ? (customSelection.serviceType || null) : null,
-            existing_account_ids: app.getSelectedIds(elements.existingAccountIds),
+            existing_account_ids: memberDraft.existing_account_ids.map((value) => app.parseInteger(value, 0)).filter(Boolean),
             team_source_task_uuids: [],
-            manual_emails: getSelectedManualEmails(),
+            manual_emails: memberDraft.manual_emails,
             ...buildRuntimeConfig(),
         };
     }
@@ -1047,8 +1194,10 @@
         const sourceAccount = app.getSelectedSourceAccount();
         const sourceTask = app.getSelectedSourceTask();
         const customSelection = app.getCustomSourceSelection();
-        const customAccounts = getSelectedCustomAccounts();
-        const manualEmails = getSelectedManualEmails();
+        const memberDraft = collectCurrentMemberDraft();
+        const selectedAccountIds = new Set(memberDraft.existing_account_ids);
+        const customAccounts = state.sources.accounts.filter((account) => selectedAccountIds.has(String(account.id)));
+        const manualEmails = memberDraft.manual_emails;
         const rows = [];
         const seenEmails = new Set();
         const mainSourceLabel = sourceMode === 'custom_domain_email'
@@ -1154,7 +1303,7 @@
         const customMemberCount = customAccounts.length + manualEmails.length;
         const includeSourceAccount = Boolean(elements.uploadSourceAccount?.checked);
         const missingSourceNote = sourceMode === 'custom_domain_email'
-            ? '先输入自定义域名邮箱并匹配到已有本地账号。'
+            ? '先输入自定义域名邮箱；如果本地还没有该账号，创建任务时会自动尝试补建。'
             : '先选择一个可用的 Team 主账号。';
         return {
             task_uuid: null,
@@ -1177,7 +1326,7 @@
         const refreshSourceSelection = (forcePreview) => {
             renderSourceMode();
             renderSourceSummary();
-            renderExistingAccounts(app.getSelectedValues(elements.existingAccountIds));
+            restoreCurrentMemberDraft();
             notifyPreviewChanged(forcePreview);
         };
 
@@ -1198,10 +1347,16 @@
         });
 
         elements.existingAccountIds.addEventListener('change', () => {
+            syncCurrentMemberDraft();
             notifyPreviewChanged(false);
         });
 
+        elements.manualEmails.addEventListener('input', () => {
+            syncCurrentMemberDraft();
+        });
+
         elements.manualEmails.addEventListener('input', window.debounce(() => {
+            syncCurrentMemberDraft();
             notifyPreviewChanged(false);
         }, 200));
 
@@ -1268,6 +1423,8 @@
         getSelectedCustomAccounts,
         getSelectedManualEmails,
         getSelectedPlatforms: buildSelectedPlatforms,
+        syncMemberDraft: syncCurrentMemberDraft,
+        restoreMemberDraft: restoreCurrentMemberDraft,
         syncPreview(forcePreview = false) {
             notifyPreviewChanged(forcePreview);
         },
