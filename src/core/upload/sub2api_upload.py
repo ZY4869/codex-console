@@ -11,10 +11,16 @@ from curl_cffi import requests as cffi_requests
 
 from ...database.models import Account
 from ...database.session import get_db
+from .platform_upload_dedupe import (
+    build_platform_duplicate_detail,
+    load_platform_upload_record,
+    save_platform_upload_record,
+)
 from .sub2api_groups import (
     bind_sub2api_accounts_to_groups,
     fetch_sub2api_groups,
     find_sub2api_account_ids_by_names,
+    search_sub2api_accounts,
 )
 from .sub2api_naming import normalize_sub2api_identity, resolve_sub2api_group_naming_identity
 from .sub2api_payload import (
@@ -64,6 +70,108 @@ def _load_group_name_map(api_url: Optional[str], api_key: Optional[str], group_i
         if group_id in mapping:
             mapping[group_id] = str(group.get("name") or mapping[group_id])
     return mapping
+
+
+def _extract_sub2api_credentials(item: Dict[str, Any]) -> Dict[str, Any]:
+    credentials = item.get("credentials")
+    return credentials if isinstance(credentials, dict) else {}
+
+
+def _resolve_sub2api_duplicate_detail(
+    account: Account,
+    *,
+    api_url: str,
+    api_key: str,
+    service_id: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    record = load_platform_upload_record(
+        account,
+        "sub2api",
+        service_id=service_id,
+        api_url=api_url,
+    )
+    generated_names = {
+        str(name).strip()
+        for name in (record or {}).get("generated_names") or []
+        if str(name).strip()
+    }
+
+    search_terms: List[str] = []
+    for raw_value in (account.account_id, account.workspace_id, account.email):
+        value = str(raw_value or "").strip()
+        if value and value not in search_terms:
+            search_terms.append(value)
+
+    remote_unstable = False
+    for term in search_terms:
+        try:
+            items = search_sub2api_accounts(api_url, api_key, term, platform="openai")
+        except Exception as exc:
+            logger.warning("Sub2API duplicate precheck failed for %s with term %s: %s", account.email, term, exc)
+            remote_unstable = True
+            continue
+
+        saw_matchable_fields = False
+        for item in items:
+            credentials = _extract_sub2api_credentials(item)
+            remote_account_id = str(
+                credentials.get("chatgpt_account_id")
+                or item.get("chatgpt_account_id")
+                or ""
+            ).strip()
+            remote_org_id = str(
+                credentials.get("organization_id")
+                or item.get("organization_id")
+                or ""
+            ).strip()
+            remote_notes = str(item.get("notes") or item.get("note") or "").strip()
+            remote_name = str(item.get("name") or "").strip()
+            if remote_account_id or remote_org_id or remote_notes or remote_name:
+                saw_matchable_fields = True
+
+            if account.account_id and remote_account_id == str(account.account_id).strip():
+                return build_platform_duplicate_detail(
+                    account,
+                    source="remote",
+                    message="Sub2API 已存在该账号，已跳过",
+                )
+            if account.workspace_id and remote_org_id == str(account.workspace_id).strip():
+                return build_platform_duplicate_detail(
+                    account,
+                    source="remote",
+                    message="Sub2API 已存在该账号，已跳过",
+                )
+            if remote_notes.lower() == str(account.email or "").strip().lower():
+                return build_platform_duplicate_detail(
+                    account,
+                    source="remote",
+                    message="Sub2API 已存在该账号，已跳过",
+                )
+            if generated_names and remote_name in generated_names:
+                return build_platform_duplicate_detail(
+                    account,
+                    source="remote",
+                    message="Sub2API 已存在该账号，已跳过",
+                )
+
+        if items and not saw_matchable_fields:
+            remote_unstable = True
+
+    if not remote_unstable or not record:
+        return None
+
+    return build_platform_duplicate_detail(
+        account,
+        source="local_record",
+        message="Sub2API 已存在本地上传记录，已跳过",
+        extra={
+            "group_id": None,
+            "group_name": None,
+            "naming_identity": normalize_sub2api_identity(account.subscription_type),
+            "generated_name": None,
+            "copy_index": 0,
+        },
+    )
 
 
 def _count_naming_identities(accounts: List[Account], group_name: Optional[str]) -> Dict[str, int]:
@@ -291,6 +399,7 @@ def _perform_sub2api_upload(
     team_context: Optional[dict] = None,
     service_id: Optional[int] = None,
     group_ids_override: Optional[List[int]] = None,
+    dedupe: bool = False,
 ) -> Dict[str, Any]:
     results = {
         "success_count": 0,
@@ -405,6 +514,30 @@ def _perform_sub2api_upload(
             results["skipped_count"] += len(blocked_details)
             results["details"].extend(blocked_details)
         uploadable_accounts = list(guard_result.get("allowed_accounts") or [])
+        if dedupe and not team_context:
+            deduped_accounts: List[Account] = []
+            for account in uploadable_accounts:
+                duplicate_detail = _resolve_sub2api_duplicate_detail(
+                    account,
+                    api_url=api_url,
+                    api_key=api_key,
+                    service_id=service.id if service else service_id,
+                )
+                if duplicate_detail:
+                    duplicate_detail.update(
+                        {
+                            "group_id": None,
+                            "group_name": None,
+                            "naming_identity": normalize_sub2api_identity(account.subscription_type),
+                            "generated_name": None,
+                            "copy_index": 0,
+                        }
+                    )
+                    results["skipped_count"] += 1
+                    results["details"].append(duplicate_detail)
+                    continue
+                deduped_accounts.append(account)
+            uploadable_accounts = deduped_accounts
         if not uploadable_accounts:
             return results
         upload_targets = [
@@ -465,6 +598,34 @@ def _perform_sub2api_upload(
                         team_context=team_context,
                         service_id=service.id if service else service_id,
                     )
+
+        if dedupe and not team_context:
+            names_by_account_id: Dict[int, List[str]] = {}
+            for detail in results["details"]:
+                if not detail.get("success"):
+                    continue
+                try:
+                    account_id = int(detail.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                generated_name = str(detail.get("generated_name") or "").strip()
+                bucket = names_by_account_id.setdefault(account_id, [])
+                if generated_name and generated_name not in bucket:
+                    bucket.append(generated_name)
+
+            account_lookup = {account.id: account for account in uploadable_accounts}
+            for account_id, generated_names in names_by_account_id.items():
+                account = account_lookup.get(account_id)
+                if not account:
+                    continue
+                save_platform_upload_record(
+                    db,
+                    account,
+                    "sub2api",
+                    service_id=service.id if service else service_id,
+                    api_url=api_url,
+                    metadata={"generated_names": generated_names},
+                )
 
     results["copy_total"] = sum(1 for detail in results["details"] if detail.get("generated_name"))
     return results
@@ -544,6 +705,7 @@ def batch_upload_to_sub2api(
     team_context: Optional[dict] = None,
     service_id: Optional[int] = None,
     group_ids_override: Optional[List[int]] = None,
+    dedupe: bool = False,
 ) -> dict:
     results = {
         "success_count": 0,
@@ -589,6 +751,7 @@ def batch_upload_to_sub2api(
         team_context=team_context,
         service_id=service_id,
         group_ids_override=group_ids_override,
+        dedupe=dedupe,
     )
     results.update(upload_results)
     return results

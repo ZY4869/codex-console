@@ -10,6 +10,11 @@ from curl_cffi import requests as cffi_requests
 
 from ...database.models import Account
 from ...database.session import get_db
+from .platform_upload_dedupe import (
+    build_platform_duplicate_detail,
+    load_platform_upload_record,
+    save_platform_upload_record,
+)
 from .team_upload_guard import (
     enrich_team_upload_error_detail,
     evaluate_team_upload_guard,
@@ -17,6 +22,27 @@ from .team_upload_guard import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_team_manager_duplicate_detail(
+    account: Account,
+    *,
+    api_url: Optional[str],
+    service_id: Optional[int] = None,
+):
+    record = load_platform_upload_record(
+        account,
+        "tm",
+        service_id=service_id,
+        api_url=api_url,
+    )
+    if not record:
+        return None
+    return build_platform_duplicate_detail(
+        account,
+        source="local_record",
+        message="Team Manager 已存在本地上传记录，已跳过",
+    )
 
 
 def upload_to_team_manager(
@@ -85,6 +111,7 @@ def batch_upload_to_team_manager(
     api_key: str,
     team_context: dict = None,
     service_id: Optional[int] = None,
+    dedupe: bool = False,
 ) -> dict:
     """
     批量上传账号到 Team Manager（使用 batch 模式，一次请求提交所有账号）
@@ -131,6 +158,20 @@ def batch_upload_to_team_manager(
             results["details"].extend(blocked_details)
 
         valid_accounts = list(guard_result.get("allowed_accounts") or [])
+        if dedupe and not team_context:
+            deduped_accounts = []
+            for account in valid_accounts:
+                duplicate_detail = _resolve_team_manager_duplicate_detail(
+                    account,
+                    api_url=api_url,
+                    service_id=service_id,
+                )
+                if duplicate_detail:
+                    results["skipped_count"] += 1
+                    results["details"].append(duplicate_detail)
+                    continue
+                deduped_accounts.append(account)
+            valid_accounts = deduped_accounts
         if not valid_accounts:
             return results
 
@@ -168,6 +209,14 @@ def batch_upload_to_team_manager(
             )
             if resp.status_code in (200, 201):
                 for account in valid_accounts:
+                    if dedupe and not team_context:
+                        save_platform_upload_record(
+                            db,
+                            account,
+                            "tm",
+                            service_id=service_id,
+                            api_url=api_url,
+                        )
                     record_team_upload_success(
                         db,
                         account,

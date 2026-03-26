@@ -960,6 +960,35 @@ async function uploadAccount(id) {
     if (choice === 'tm') return uploadToTm(id);
 }
 
+function handleSingleUploadResult(result, defaultSuccessMessage = '上传成功') {
+    if (result?.success && result?.skipped) {
+        toast.info(result.message || '平台已存在，已跳过');
+        return 'skipped';
+    }
+    if (result?.success) {
+        toast.success(result.message || defaultSuccessMessage);
+        return 'success';
+    }
+    toast.error('上传失败: ' + (result?.error || result?.message || '未知错误'));
+    return 'error';
+}
+
+function showBatchUploadSummary(result) {
+    const successCount = Number(result?.success_count || 0);
+    const failedCount = Number(result?.failed_count || 0);
+    const skippedCount = Number(result?.skipped_count || 0);
+
+    if (successCount === 0 && failedCount === 0 && skippedCount > 0) {
+        toast.info(`已跳过: ${skippedCount}`);
+        return;
+    }
+
+    let message = `成功: ${successCount}`;
+    if (failedCount > 0) message += `, 失败: ${failedCount}`;
+    if (skippedCount > 0) message += `, 跳过: ${skippedCount}`;
+    toast.success(message);
+}
+
 // 上传单个账号到CPA
 async function uploadToCpa(id) {
     const choice = await selectCpaService();
@@ -970,13 +999,8 @@ async function uploadToCpa(id) {
         const payload = {};
         if (choice.cpa_service_id != null) payload.cpa_service_id = choice.cpa_service_id;
         const result = await api.post(`/accounts/${id}/upload-cpa`, payload);
-
-        if (result.success) {
-            toast.success('上传成功');
-            loadAccounts();
-        } else {
-            toast.error('上传失败: ' + (result.error || '未知错误'));
-        }
+        const status = handleSingleUploadResult(result);
+        if (status !== 'error') loadAccounts();
     } catch (error) {
         toast.error('上传失败: ' + error.message);
     }
@@ -1000,12 +1024,7 @@ async function handleBatchUploadCpa() {
         const payload = buildBatchPayload();
         if (choice.cpa_service_id != null) payload.cpa_service_id = choice.cpa_service_id;
         const result = await api.post('/accounts/batch-upload-cpa', payload);
-
-        let message = `成功: ${result.success_count}`;
-        if (result.failed_count > 0) message += `, 失败: ${result.failed_count}`;
-        if (result.skipped_count > 0) message += `, 跳过: ${result.skipped_count}`;
-
-        toast.success(message);
+        showBatchUploadSummary(result);
         loadAccounts();
     } catch (error) {
         toast.error('批量上传失败: ' + error.message);
@@ -1145,12 +1164,7 @@ async function handleBatchUploadSub2Api() {
         const payload = buildBatchPayload();
         if (choice.service_id != null) payload.service_id = choice.service_id;
         const result = await api.post('/accounts/batch-upload-sub2api', payload);
-
-        let message = `成功: ${result.success_count}`;
-        if (result.failed_count > 0) message += `, 失败: ${result.failed_count}`;
-        if (result.skipped_count > 0) message += `, 跳过: ${result.skipped_count}`;
-
-        toast.success(message);
+        showBatchUploadSummary(result);
         loadAccounts();
     } catch (error) {
         toast.error('批量上传失败: ' + error.message);
@@ -1170,12 +1184,8 @@ async function uploadToSub2Api(id) {
         const payload = {};
         if (choice.service_id != null) payload.service_id = choice.service_id;
         const result = await api.post(`/accounts/${id}/upload-sub2api`, payload);
-        if (result.success) {
-            toast.success('上传成功');
-            loadAccounts();
-        } else {
-            toast.error('上传失败: ' + (result.error || result.message || '未知错误'));
-        }
+        const status = handleSingleUploadResult(result);
+        if (status !== 'error') loadAccounts();
     } catch (e) {
         toast.error('上传失败: ' + e.message);
     }
@@ -1257,11 +1267,8 @@ async function uploadToTm(id) {
         const payload = {};
         if (choice.service_id != null) payload.service_id = choice.service_id;
         const result = await api.post(`/accounts/${id}/upload-tm`, payload);
-        if (result.success) {
-            toast.success('上传成功');
-        } else {
-            toast.error('上传失败: ' + (result.message || '未知错误'));
-        }
+        const status = handleSingleUploadResult(result);
+        if (status !== 'error') loadAccounts();
     } catch (e) {
         toast.error('上传失败: ' + e.message);
     }
@@ -1285,10 +1292,7 @@ async function handleBatchUploadTm() {
         const payload = buildBatchPayload();
         if (choice.service_id != null) payload.service_id = choice.service_id;
         const result = await api.post('/accounts/batch-upload-tm', payload);
-        let message = `成功: ${result.success_count}`;
-        if (result.failed_count > 0) message += `, 失败: ${result.failed_count}`;
-        if (result.skipped_count > 0) message += `, 跳过: ${result.skipped_count}`;
-        toast.success(message);
+        showBatchUploadSummary(result);
         loadAccounts();
     } catch (e) {
         toast.error('批量上传失败: ' + e.message);

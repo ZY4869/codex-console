@@ -22,12 +22,16 @@ from ...core.openai.account_sensitive_info import (
 )
 from ...core.openai.token_refresh import refresh_account_token as do_refresh
 from ...core.openai.token_refresh import validate_account_token as do_validate
-from ...core.upload.cpa_upload import generate_token_json, batch_upload_to_cpa, upload_to_cpa
+from ...core.upload.cpa_upload import generate_token_json, batch_upload_to_cpa
 from ...core.upload.team_manager_upload import upload_to_team_manager, batch_upload_to_team_manager
 from ...core.upload.sub2api_upload import (
     batch_upload_to_sub2api,
     prepare_sub2api_export_payload,
-    upload_to_sub2api,
+)
+from ...core.upload.platform_upload_dedupe import (
+    PLATFORM_DUPLICATE_REASON,
+    load_platform_upload_record,
+    save_platform_upload_record,
 )
 
 from ...core.dynamic_proxy import get_proxy_url_for_task
@@ -770,7 +774,14 @@ async def batch_upload_accounts_to_cpa(request: BatchCPAUploadRequest):
             request.status_filter, request.email_service_filter, request.search_filter
         )
 
-    results = batch_upload_to_cpa(ids, proxy, api_url=cpa_api_url, api_token=cpa_api_token)
+    results = batch_upload_to_cpa(
+        ids,
+        proxy,
+        api_url=cpa_api_url,
+        api_token=cpa_api_token,
+        service_id=request.cpa_service_id,
+        dedupe=True,
+    )
     return results
 
 
@@ -797,25 +808,15 @@ async def upload_account_to_cpa(account_id: int, request: Optional[CPAUploadRequ
         if not account:
             raise HTTPException(status_code=404, detail="账号不存在")
 
-        if not account.access_token:
-            return {
-                "success": False,
-                "error": "账号缺少 Token，无法上传"
-            }
-
-        # 生成 Token JSON
-        token_data = generate_token_json(account)
-
-        # 上传
-        success, message = upload_to_cpa(token_data, proxy, api_url=cpa_api_url, api_token=cpa_api_token)
-
-        if success:
-            account.cpa_uploaded = True
-            account.cpa_uploaded_at = datetime.utcnow()
-            db.commit()
-            return {"success": True, "message": message}
-        else:
-            return {"success": False, "error": message}
+    results = batch_upload_to_cpa(
+        [account_id],
+        proxy,
+        api_url=cpa_api_url,
+        api_token=cpa_api_token,
+        service_id=cpa_service_id,
+        dedupe=True,
+    )
+    return build_single_upload_response(results)
 
 
 class Sub2ApiUploadRequest(BaseModel):
@@ -872,8 +873,35 @@ async def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
         concurrency=request.concurrency,
         priority=request.priority,
         service_id=request.service_id or (svc.id if svc else None),
+        dedupe=True,
     )
     return results
+
+
+def build_single_upload_response(results: dict) -> dict:
+    detail = next(iter(results.get("details") or []), {})
+    failed_count = int(results.get("failed_count") or 0)
+    skipped_count = int(results.get("skipped_count") or 0)
+    success_count = int(results.get("success_count") or 0)
+
+    if failed_count > 0:
+        return {"success": False, "error": detail.get("error") or "上传失败"}
+
+    if skipped_count > 0 and success_count == 0:
+        if detail.get("reason_code") == PLATFORM_DUPLICATE_REASON:
+            response = {
+                "success": True,
+                "skipped": True,
+                "message": detail.get("message") or "平台已存在，已跳过",
+            }
+            if detail.get("reason_code"):
+                response["reason_code"] = detail.get("reason_code")
+            if detail.get("duplicate_source"):
+                response["duplicate_source"] = detail.get("duplicate_source")
+            return response
+        return {"success": False, "error": detail.get("error") or detail.get("message") or "上传已跳过"}
+
+    return {"success": True, "message": detail.get("message") or "上传成功"}
 
 
 @router.post("/{account_id}/upload-sub2api")
@@ -907,19 +935,16 @@ async def upload_account_to_sub2api(account_id: int, request: Optional[Sub2ApiUp
         account = crud.get_account_by_id(db, account_id)
         if not account:
             raise HTTPException(status_code=404, detail="账号不存在")
-        if not account.access_token:
-            return {"success": False, "error": "账号缺少 Token，无法上传"}
-
-        success, message = upload_to_sub2api(
-            [account], api_url, api_key,
-            concurrency=concurrency,
-            priority=priority,
-            service_id=service_id or (svc.id if svc else None),
-        )
-        if success:
-            return {"success": True, "message": message}
-        else:
-            return {"success": False, "error": message}
+    results = batch_upload_to_sub2api(
+        [account_id],
+        api_url,
+        api_key,
+        concurrency=concurrency,
+        priority=priority,
+        service_id=service_id or (svc.id if svc else None),
+        dedupe=True,
+    )
+    return build_single_upload_response(results)
 
 
 # ============== Team Manager 上传 ==============
@@ -959,7 +984,13 @@ async def batch_upload_accounts_to_tm(request: BatchUploadTMRequest):
             request.status_filter, request.email_service_filter, request.search_filter
         )
 
-    results = batch_upload_to_team_manager(ids, api_url, api_key)
+    results = batch_upload_to_team_manager(
+        ids,
+        api_url,
+        api_key,
+        service_id=request.service_id or (svc.id if svc else None),
+        dedupe=True,
+    )
     return results
 
 
@@ -985,9 +1016,36 @@ async def upload_account_to_tm(account_id: int, request: Optional[UploadTMReques
         account = crud.get_account_by_id(db, account_id)
         if not account:
             raise HTTPException(status_code=404, detail="账号不存在")
-        success, message = upload_to_team_manager(account, api_url, api_key)
+        if not account.access_token:
+            return {"success": False, "error": "账号缺少 access_token"}
 
-    return {"success": success, "message": message}
+        record = load_platform_upload_record(
+            account,
+            "tm",
+            service_id=service_id or (svc.id if svc else None),
+            api_url=api_url,
+        )
+        if record:
+            return {
+                "success": True,
+                "skipped": True,
+                "message": "Team Manager 已存在本地上传记录，已跳过",
+                "reason_code": PLATFORM_DUPLICATE_REASON,
+                "duplicate_source": "local_record",
+            }
+
+        success, message = upload_to_team_manager(account, api_url, api_key)
+        if success:
+            save_platform_upload_record(
+                db,
+                account,
+                "tm",
+                service_id=service_id or (svc.id if svc else None),
+                api_url=api_url,
+            )
+            return {"success": True, "message": message}
+
+    return {"success": False, "error": message}
 
 
 # ============== Inbox Code ==============
