@@ -36,6 +36,9 @@ _task_status: Dict[str, dict] = {}
 # 任务取消标志
 _task_cancelled: Dict[str, bool] = {}
 
+# 活跃引擎实例（用于立即取消浏览器注册）
+_active_engines: Dict[str, Any] = {}
+
 # 批量任务状态 (batch_id -> dict)
 _batch_status: Dict[str, dict] = {}
 _batch_logs: Dict[str, List[str]] = defaultdict(list)
@@ -79,9 +82,23 @@ class TaskManager:
         """检查任务是否已取消"""
         return _task_cancelled.get(task_uuid, False)
 
+    def register_engine(self, task_uuid: str, engine):
+        """注册活跃引擎实例（用于立即取消）"""
+        _active_engines[task_uuid] = engine
+
+    def unregister_engine(self, task_uuid: str):
+        """移除活跃引擎实例"""
+        _active_engines.pop(task_uuid, None)
+
     def cancel_task(self, task_uuid: str):
-        """取消任务"""
+        """取消任务，若有浏览器引擎则立即关闭"""
         _task_cancelled[task_uuid] = True
+        engine = _active_engines.pop(task_uuid, None)
+        if engine and hasattr(engine, "cancel"):
+            try:
+                engine.cancel()
+            except Exception:
+                pass
         logger.info(f"任务 {task_uuid} 已标记为取消")
 
     def add_log(self, task_uuid: str, log_message: str):

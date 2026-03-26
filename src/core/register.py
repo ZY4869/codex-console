@@ -503,6 +503,28 @@ class RegistrationEngine:
             response_data=response_data,
         )
 
+    def _submit_codex_consent_post(self) -> bool:
+        """POST consent 到 authorize/continue 端点，触发 workspace 分配。"""
+        try:
+            self._log("提交 Codex 授权同意，触发 workspace 分配...")
+            response = self.session.post(
+                OPENAI_API_ENDPOINTS["signup"],
+                headers={
+                    "referer": "https://auth.openai.com/sign-in-with-chatgpt/codex/consent",
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                },
+                data="{}",
+            )
+            self._log(f"Codex 授权同意响应状态: {response.status_code}")
+            if response.status_code != 200:
+                self._log(f"Codex 授权同意失败: {response.text[:200]}", "warning")
+                return False
+            return True
+        except Exception as e:
+            self._log(f"提交 Codex 授权同意异常: {e}", "error")
+            return False
+
     def _reset_auth_flow(self) -> None:
         """重置会话，准备重新发起 OAuth 流程。"""
         self.http_client.close()
@@ -547,9 +569,18 @@ class RegistrationEngine:
                 return False
 
             self._log("核对登录验证码，验明正身一下...")
-            if not self._validate_verification_code(code):
+            otp_response = self._validate_verification_code(code)
+            if otp_response is None:
                 result.error_message = "验证码校验失败"
                 return False
+
+            # 检查 OTP 验证后是否需要 consent 步骤（新账号首次 Codex 登录）
+            otp_page_type = (otp_response.get("page") or {}).get("type", "")
+            if otp_page_type == OPENAI_PAGE_TYPES["CODEX_CONSENT"]:
+                self._log("验证码校验后遇到 Codex 授权同意页，自动提交同意...")
+                if not self._submit_codex_consent_post():
+                    result.error_message = "Codex 授权同意提交失败"
+                    return False
 
         target_ws = getattr(self, "_target_workspace_id", None)
         if target_ws:
@@ -558,6 +589,13 @@ class RegistrationEngine:
         else:
             self._log("摸一下 Workspace ID，看看该坐哪桌...")
             workspace_id = self._get_workspace_id()
+
+            # 新账号 OTP 后 cookie 可能还没有 workspace，主动推进 authorize/continue 触发分配
+            if not workspace_id:
+                self._log("Cookie 中未找到 workspace，尝试推进授权流程触发 workspace 分配...")
+                if self._submit_codex_consent_post():
+                    workspace_id = self._get_workspace_id()
+
             if not workspace_id:
                 result.error_message = "获取 Workspace ID 失败"
                 return False
@@ -785,8 +823,8 @@ class RegistrationEngine:
             self._log(f"获取验证码失败: {e}", "error")
             return None
 
-    def _validate_verification_code(self, code: str) -> bool:
-        """验证验证码"""
+    def _validate_verification_code(self, code: str) -> Optional[dict]:
+        """验证验证码，成功返回响应数据字典，失败返回 None"""
         try:
             code_body = f'{{"code":"{code}"}}'
 
@@ -801,11 +839,23 @@ class RegistrationEngine:
             )
 
             self._log(f"验证码校验状态: {response.status_code}")
-            return response.status_code == 200
+            if response.status_code != 200:
+                return None
+
+            try:
+                response_data = response.json()
+            except Exception:
+                response_data = {}
+
+            page_type = (response_data.get("page") or {}).get("type", "")
+            if page_type:
+                self._log(f"验证码校验响应页面类型: {page_type}")
+
+            return response_data
 
         except Exception as e:
             self._log(f"验证验证码失败: {e}", "error")
-            return False
+            return None
 
     def _create_user_account(self) -> bool:
         """创建用户账户"""
@@ -859,10 +909,14 @@ class RegistrationEngine:
                 pad = "=" * ((4 - (len(payload) % 4)) % 4)
                 decoded = base64.urlsafe_b64decode((payload + pad).encode("ascii"))
                 auth_json = json_module.loads(decoded.decode("utf-8"))
+                self._log(f"授权 Cookie 字段: {list(auth_json.keys())}")
 
                 workspaces = auth_json.get("workspaces") or []
                 if not workspaces:
-                    self._log("授权 Cookie 里没有 workspace 信息", "error")
+                    self._log(
+                        f"授权 Cookie 里没有 workspace 信息 (字段: {list(auth_json.keys())})",
+                        "error",
+                    )
                     return None
 
                 workspace_id = str((workspaces[0] or {}).get("id") or "").strip()
@@ -1086,7 +1140,7 @@ class RegistrationEngine:
                     return result
 
                 self._log("8. 对一下验证码，看看是不是本人...")
-                if not self._validate_verification_code(code):
+                if self._validate_verification_code(code) is None:
                     result.error_message = "验证验证码失败"
                     return result
 

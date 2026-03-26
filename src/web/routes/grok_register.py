@@ -93,8 +93,8 @@ def _resolved_task_config(request: "GrokRegisterCreateRequest") -> Dict[str, Any
 
 def _resolve_task_proxy(request_proxy: Optional[str], settings) -> Optional[str]:
     if request_proxy is not None:
-        value = str(request_proxy).strip()
-        return value or None
+        from ...core.dynamic_proxy import normalize_proxy_input
+        return normalize_proxy_input(str(request_proxy))
 
     saved = str(settings.grok_default_proxy or "").strip()
     if saved:

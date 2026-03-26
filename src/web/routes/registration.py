@@ -72,11 +72,54 @@ def update_proxy_usage(db, proxy_id: Optional[int]):
         crud.update_proxy_last_used(db, proxy_id)
 
 
+# ============== Proxy Test ==============
+
+class ProxyTestRequest(BaseModel):
+    """代理测试请求"""
+    proxy: str
+
+
+@router.post("/proxy/test")
+async def test_proxy_connection(request: ProxyTestRequest):
+    """测试用户输入的代理字符串是否可用"""
+    from ...core.dynamic_proxy import normalize_proxy_input
+
+    proxy_url = normalize_proxy_input(request.proxy)
+    if not proxy_url:
+        raise HTTPException(status_code=400, detail="代理地址不能为空")
+
+    import time
+    from curl_cffi import requests as cffi_requests
+    try:
+        proxies = {"http": proxy_url, "https": proxy_url}
+        start = time.time()
+        resp = cffi_requests.get(
+            "https://api.ipify.org?format=json",
+            proxies=proxies,
+            timeout=10,
+            impersonate="chrome110",
+        )
+        elapsed = round((time.time() - start) * 1000)
+        if resp.status_code == 200:
+            ip = resp.json().get("ip", "")
+            return {
+                "success": True,
+                "proxy_url": proxy_url,
+                "ip": ip,
+                "response_time": elapsed,
+                "message": f"代理可用，出口 IP: {ip}，响应时间: {elapsed}ms",
+            }
+        return {"success": False, "proxy_url": proxy_url, "message": f"代理连接失败: HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"success": False, "proxy_url": proxy_url, "message": f"代理连接失败: {e}"}
+
+
 # ============== Pydantic Models ==============
 
 class RegistrationTaskCreate(BaseModel):
     """创建注册任务请求"""
     email_service_type: str = "tempmail"
+    registration_mode: str = "protocol"  # "protocol" 或 "browser"
     proxy: Optional[str] = None
     email_service_config: Optional[dict] = None
     email_service_id: Optional[int] = None
@@ -97,6 +140,7 @@ class BatchRegistrationRequest(BaseModel):
     """批量注册请求"""
     count: int = 1
     email_service_type: str = "tempmail"
+    registration_mode: str = "protocol"  # "protocol" 或 "browser"
     proxy: Optional[str] = None
     email_service_config: Optional[dict] = None
     email_service_id: Optional[int] = None
@@ -427,6 +471,7 @@ def _execute_single_registration_attempt(
     selected_email_addresses: List[str],
     selected_domains: List[str],
     log_callback,
+    registration_mode: str = "protocol",
 ) -> Tuple[RegistrationResult, str]:
     """执行一次完整的注册尝试，成功后保证账号已落库。"""
     selection = RegistrationSelectionRequest(
@@ -465,13 +510,30 @@ def _execute_single_registration_attempt(
         resolved_service.config,
         name=resolved_service.service_name,
     )
-    engine = RegistrationEngine(
-        email_service=email_service,
-        proxy_url=actual_proxy_url,
-        callback_logger=log_callback,
-        task_uuid=task_uuid,
-    )
-    result = engine.run()
+
+    if registration_mode == "browser":
+        from ...core.browser_register import BrowserRegistrationEngine
+        engine = BrowserRegistrationEngine(
+            email_service=email_service,
+            proxy_url=actual_proxy_url,
+            callback_logger=log_callback,
+            task_uuid=task_uuid,
+        )
+    else:
+        engine = RegistrationEngine(
+            email_service=email_service,
+            proxy_url=actual_proxy_url,
+            callback_logger=log_callback,
+            task_uuid=task_uuid,
+        )
+
+    # 注册引擎实例，使取消能立即关闭浏览器
+    task_manager.register_engine(task_uuid, engine)
+    try:
+        result = engine.run()
+    finally:
+        task_manager.unregister_engine(task_uuid)
+
     if not result.success:
         raise RuntimeError(result.error_message or "注册失败")
 
@@ -502,6 +564,7 @@ def _run_sync_registration_task(
     sub2api_service_ids: List[int] = None,
     auto_upload_tm: bool = False,
     tm_service_ids: List[int] = None,
+    registration_mode: str = "protocol",
 ):
     """
     在线程池中执行的同步注册任务
@@ -531,7 +594,8 @@ def _run_sync_registration_task(
                 logger.info(f"任务 {task_uuid} 已取消，跳过执行")
                 return
 
-            actual_proxy_url = proxy
+            from ...core.dynamic_proxy import normalize_proxy_input
+            actual_proxy_url = normalize_proxy_input(proxy) if proxy else None
             proxy_id = None
             if not actual_proxy_url:
                 actual_proxy_url, proxy_id = get_proxy_for_registration(db)
@@ -594,6 +658,7 @@ def _run_sync_registration_task(
                         selected_email_addresses=selected_email_addresses or [],
                         selected_domains=selected_domains or [],
                         log_callback=log_callback,
+                        registration_mode=registration_mode,
                     )
                     last_email = result.email
                     last_email_service = email_service_value
@@ -753,6 +818,7 @@ async def run_registration_task(
     sub2api_service_ids: List[int] = None,
     auto_upload_tm: bool = False,
     tm_service_ids: List[int] = None,
+    registration_mode: str = "protocol",
 ):
     """
     异步执行注册任务
@@ -801,6 +867,7 @@ async def run_registration_task(
             sub2api_service_ids or [],
             auto_upload_tm,
             tm_service_ids or [],
+            registration_mode,
         )
     except Exception as e:
         logger.error(f"线程池执行异常: {task_uuid}, 错误: {e}")
@@ -868,6 +935,7 @@ async def run_batch_parallel(
     sub2api_service_ids: List[int] = None,
     auto_upload_tm: bool = False,
     tm_service_ids: List[int] = None,
+    registration_mode: str = "protocol",
 ):
     """
     并行模式：所有任务同时提交，Semaphore 控制最大并发数
@@ -889,6 +957,7 @@ async def run_batch_parallel(
                 auto_upload_cpa=auto_upload_cpa, cpa_service_ids=cpa_service_ids or [],
                 auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids or [],
                 auto_upload_tm=auto_upload_tm, tm_service_ids=tm_service_ids or [],
+                registration_mode=registration_mode,
             )
         with get_db() as db:
             t = crud.get_registration_task(db, uuid)
@@ -941,6 +1010,7 @@ async def run_batch_pipeline(
     sub2api_service_ids: List[int] = None,
     auto_upload_tm: bool = False,
     tm_service_ids: List[int] = None,
+    registration_mode: str = "protocol",
 ):
     """
     流水线模式：每隔 interval 秒启动一个新任务，Semaphore 限制最大并发数
@@ -962,6 +1032,7 @@ async def run_batch_pipeline(
                 auto_upload_cpa=auto_upload_cpa, cpa_service_ids=cpa_service_ids or [],
                 auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids or [],
                 auto_upload_tm=auto_upload_tm, tm_service_ids=tm_service_ids or [],
+                registration_mode=registration_mode,
             )
             with get_db() as db:
                 t = crud.get_registration_task(db, uuid)
@@ -1038,6 +1109,7 @@ async def run_batch_registration(
     sub2api_service_ids: List[int] = None,
     auto_upload_tm: bool = False,
     tm_service_ids: List[int] = None,
+    registration_mode: str = "protocol",
 ):
     """根据 mode 分发到并行或流水线执行"""
     if mode == "parallel":
@@ -1050,6 +1122,7 @@ async def run_batch_registration(
             auto_upload_cpa=auto_upload_cpa, cpa_service_ids=cpa_service_ids,
             auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids,
             auto_upload_tm=auto_upload_tm, tm_service_ids=tm_service_ids,
+            registration_mode=registration_mode,
         )
     else:
         await run_batch_pipeline(
@@ -1061,6 +1134,7 @@ async def run_batch_registration(
             auto_upload_cpa=auto_upload_cpa, cpa_service_ids=cpa_service_ids,
             auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids,
             auto_upload_tm=auto_upload_tm, tm_service_ids=tm_service_ids,
+            registration_mode=registration_mode,
         )
 
 
@@ -1119,6 +1193,7 @@ async def start_registration(
         request.sub2api_service_ids,
         request.auto_upload_tm,
         request.tm_service_ids,
+        request.registration_mode,
     )
 
     return task_to_response(task)
@@ -1201,6 +1276,7 @@ async def start_batch_registration(
         request.sub2api_service_ids,
         request.auto_upload_tm,
         request.tm_service_ids,
+        request.registration_mode,
     )
 
     return BatchRegistrationResponse(

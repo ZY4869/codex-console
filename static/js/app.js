@@ -58,6 +58,10 @@ const elements = {
     emailAddressSelect: document.getElementById('email-address-select'),
     emailAddressSelectAllBtn: document.getElementById('email-address-select-all-btn'),
     emailAddressSelectClearBtn: document.getElementById('email-address-select-clear-btn'),
+    regProxy: document.getElementById('reg-proxy'),
+    testProxyBtn: document.getElementById('test-proxy-btn'),
+    proxyTestResult: document.getElementById('proxy-test-result'),
+    registrationMode: document.getElementById('reg-registration-mode'),
     regMode: document.getElementById('reg-mode'),
     regModeGroup: document.getElementById('reg-mode-group'),
     batchCountGroup: document.getElementById('batch-count-group'),
@@ -503,6 +507,51 @@ function initEventListeners() {
     // 取消按钮
     elements.cancelBtn.addEventListener('click', handleCancelTask);
 
+    // 测试代理
+    if (elements.testProxyBtn) {
+        elements.testProxyBtn.addEventListener('click', async () => {
+            const raw = elements.regProxy ? elements.regProxy.value.trim() : '';
+            const resultEl = elements.proxyTestResult;
+            if (!raw) {
+                if (resultEl) {
+                    resultEl.style.display = 'block';
+                    resultEl.style.color = 'var(--warning-color)';
+                    resultEl.textContent = '请先输入代理地址';
+                }
+                return;
+            }
+            elements.testProxyBtn.disabled = true;
+            elements.testProxyBtn.textContent = '测试中...';
+            if (resultEl) {
+                resultEl.style.display = 'block';
+                resultEl.style.color = 'var(--text-muted)';
+                resultEl.textContent = '正在连接...';
+            }
+            try {
+                const resp = await fetch('/api/registration/proxy/test', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ proxy: raw }),
+                });
+                const data = await resp.json();
+                if (resultEl) {
+                    resultEl.style.display = 'block';
+                    resultEl.style.color = data.success ? 'var(--success-color)' : 'var(--error-color)';
+                    resultEl.textContent = data.message || (data.success ? '代理可用' : '代理不可用');
+                }
+            } catch (e) {
+                if (resultEl) {
+                    resultEl.style.display = 'block';
+                    resultEl.style.color = 'var(--error-color)';
+                    resultEl.textContent = '请求失败: ' + e.message;
+                }
+            } finally {
+                elements.testProxyBtn.disabled = false;
+                elements.testProxyBtn.textContent = '测试';
+            }
+        });
+    }
+
     // 清空日志
     elements.clearLogBtn.addEventListener('click', () => {
         elements.consoleLog.innerHTML = '<div class="log-line info">[系统] 日志已清空</div>';
@@ -838,9 +887,11 @@ async function handleStartRegistration(e) {
     // 清空日志
     elements.consoleLog.innerHTML = '';
 
-    // 构建请求数据（代理从设置中自动获取）
+    // 构建请求数据
     const requestData = {
         email_service_type: emailServiceType,
+        registration_mode: elements.registrationMode ? elements.registrationMode.value : 'protocol',
+        proxy: elements.regProxy ? elements.regProxy.value.trim() || null : null,
         random_email_service: !!(elements.randomEmailService && elements.randomEmailService.checked && !elements.randomEmailService.disabled),
         random_outlook_account: !!(elements.randomOutlookAccount && elements.randomOutlookAccount.checked),
         random_domain: !!(elements.randomDomain && elements.randomDomain.checked),
@@ -1600,6 +1651,7 @@ async function handleOutlookBatchRegistration() {
     const requestData = {
         service_ids: selectedIds,
         skip_registered: skipRegistered,
+        proxy: elements.regProxy ? elements.regProxy.value.trim() || null : null,
         interval_min: intervalMin,
         interval_max: intervalMax,
         concurrency: Math.min(50, Math.max(1, concurrency)),

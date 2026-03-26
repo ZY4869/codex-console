@@ -461,3 +461,135 @@ def test_submit_signup_retries_when_auth_step_is_invalid():
     retry_body = json.loads(fresh_session.calls[1]["kwargs"]["data"])
     assert retry_body["screen_hint"] == "signup"
     assert retry_body["username"]["value"] == "tester@example.com"
+
+
+def test_new_registration_handles_consent_after_otp():
+    """新账号重登录: OTP 验证后返回 consent 页面，需 POST consent 才能获取 workspace。"""
+    session_one = QueueSession([
+        ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["signup"],
+            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]}}),
+        ),
+        ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
+        ("GET", OPENAI_API_ENDPOINTS["send_otp"], DummyResponse(payload={})),
+        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], DummyResponse(payload={})),
+        ("POST", OPENAI_API_ENDPOINTS["create_account"], DummyResponse(payload={})),
+    ])
+    session_two = QueueSession([
+        ("GET", "https://auth.example.test/flow/2", _response_with_did("did-2")),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["signup"],
+            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["LOGIN_PASSWORD"]}}),
+        ),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["password_verify"],
+            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]}}),
+        ),
+        # OTP 验证返回 consent 页面，无 workspace cookie
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["validate_otp"],
+            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["CODEX_CONSENT"]}}),
+        ),
+        # Consent POST 触发 workspace 分配，设置 cookie
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["signup"],
+            _response_with_login_cookies("ws-new", "session-new"),
+        ),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["select_workspace"],
+            DummyResponse(payload={"continue_url": "https://auth.example.test/continue"}),
+        ),
+        (
+            "GET",
+            "https://auth.example.test/continue",
+            DummyResponse(
+                status_code=302,
+                headers={"Location": "http://localhost:1455/auth/callback?code=code-2&state=state-2"},
+            ),
+        ),
+    ])
+
+    email_service = FakeEmailService(["111111", "222222"])
+    engine = RegistrationEngine(email_service)
+    engine.http_client = FakeOpenAIClient([session_one, session_two], ["sentinel-1", "sentinel-2"])
+    engine.oauth_manager = FakeOAuthManager()
+
+    result = engine.run()
+
+    assert result.success is True
+    assert result.workspace_id == "ws-new"
+    assert result.session_token == "session-new"
+    assert result.source == "register"
+    # 验证 consent POST 使用了正确的 referer
+    consent_call = session_two.calls[4]
+    assert consent_call["url"] == OPENAI_API_ENDPOINTS["signup"]
+    assert "codex/consent" in consent_call["kwargs"]["headers"]["referer"]
+
+
+def test_new_registration_fallback_consent_when_cookie_lacks_workspace():
+    """新账号重登录: OTP 验证后 cookie 无 workspace（无 consent page type），fallback 推进授权流程。"""
+    session_one = QueueSession([
+        ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["signup"],
+            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]}}),
+        ),
+        ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
+        ("GET", OPENAI_API_ENDPOINTS["send_otp"], DummyResponse(payload={})),
+        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], DummyResponse(payload={})),
+        ("POST", OPENAI_API_ENDPOINTS["create_account"], DummyResponse(payload={})),
+    ])
+    session_two = QueueSession([
+        ("GET", "https://auth.example.test/flow/2", _response_with_did("did-2")),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["signup"],
+            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["LOGIN_PASSWORD"]}}),
+        ),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["password_verify"],
+            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]}}),
+        ),
+        # OTP 验证返回空 payload，无 consent page type，且 cookie 无 workspace
+        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], DummyResponse(payload={})),
+        # fallback: 推进 authorize/continue 触发 workspace 分配
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["signup"],
+            _response_with_login_cookies("ws-fallback", "session-fallback"),
+        ),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["select_workspace"],
+            DummyResponse(payload={"continue_url": "https://auth.example.test/continue"}),
+        ),
+        (
+            "GET",
+            "https://auth.example.test/continue",
+            DummyResponse(
+                status_code=302,
+                headers={"Location": "http://localhost:1455/auth/callback?code=code-2&state=state-2"},
+            ),
+        ),
+    ])
+
+    email_service = FakeEmailService(["111111", "222222"])
+    engine = RegistrationEngine(email_service)
+    engine.http_client = FakeOpenAIClient([session_one, session_two], ["sentinel-1", "sentinel-2"])
+    engine.oauth_manager = FakeOAuthManager()
+
+    result = engine.run()
+
+    assert result.success is True
+    assert result.workspace_id == "ws-fallback"
+    assert result.session_token == "session-fallback"
+    assert result.source == "register"

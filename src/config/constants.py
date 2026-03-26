@@ -201,9 +201,8 @@ def generate_random_user_info() -> dict:
     # 随机选择名字
     name = random.choice(FIRST_NAMES)
 
-    # 生成随机生日（18-45岁）
-    current_year = datetime.now().year
-    birth_year = random.randint(current_year - 45, current_year - 18)
+    # 生成随机生日（1995-2000 年出生）
+    birth_year = random.randint(1995, 2000)
     birth_month = random.randint(1, 12)
     # 根据月份确定天数
     if birth_month in [1, 3, 5, 7, 8, 10, 12]:

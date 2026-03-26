@@ -191,6 +191,23 @@
                         <div class="card-body">
                             <form id="registration-form">
                                 <div class="form-group">
+                                    <label for="reg-proxy">代理地址</label>
+                                    <div style="display: flex; gap: 6px; align-items: center;">
+                                        <input type="text" id="reg-proxy" name="proxy" style="flex: 1;"
+                                               placeholder="留空使用系统设置，支持 host:port:user:pass 格式">
+                                        <button type="button" class="btn btn-ghost btn-sm" id="test-proxy-btn"
+                                                style="white-space: nowrap;">测试</button>
+                                    </div>
+                                    <small id="proxy-test-result" style="display: none; font-size: 0.75rem; margin-top: 4px;"></small>
+                                </div>
+                                <div class="form-group">
+                                    <label for="reg-registration-mode">注册模式</label>
+                                    <select id="reg-registration-mode" name="registration_mode">
+                                        <option value="protocol">协议注册（快速）</option>
+                                        <option value="browser">浏览器注册（反风控）</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
                                     <label for="email-service">邮箱服务</label>
                                     <select id="email-service" name="email_service" required>
                                         <option value="tempmail:default">Tempmail.lol (临时邮箱)</option>
