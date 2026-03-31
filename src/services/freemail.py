@@ -10,7 +10,7 @@ import random
 import string
 from typing import Optional, Dict, Any, List
 
-from .base import BaseEmailService, EmailServiceError, EmailServiceType, looks_like_verification_email
+from .base import BaseEmailService, EmailServiceError, EmailServiceType
 from ..core.http_client import HTTPClient, RequestConfig
 from ..config.constants import OTP_CODE_PATTERN
 
@@ -130,18 +130,8 @@ class FreemailService(BaseEmailService):
             - service_id: 同 email（用作标识）
         """
         self._ensure_domains()
-
-        req_config = {**self.config, **(config or {})}
-        existing_email = str(req_config.get("existing_email") or "").strip()
-        if existing_email:
-            self.update_status(True)
-            return {
-                "email": existing_email,
-                "service_id": existing_email,
-                "id": existing_email,
-                "created_at": time.time(),
-            }
-
+        
+        req_config = config or {}
         domain_index = 0
         target_domain = req_config.get("domain") or self.config.get("domain")
         
@@ -233,7 +223,7 @@ class FreemailService(BaseEmailService):
                     
                     content = f"{sender}\n{subject}\n{preview}"
                     
-                    if not looks_like_verification_email(content):
+                    if "openai" not in content.lower():
                         continue
 
                     # 尝试直接使用 Freemail 提取的验证码
@@ -308,47 +298,6 @@ class FreemailService(BaseEmailService):
             self.update_status(False, e)
             return []
 
-    def get_email_messages(self, email_id: str, **kwargs) -> List[Dict[str, Any]]:
-        """获取指定 Freemail 邮箱的邮件列表。"""
-        try:
-            mails = self._make_request(
-                "GET",
-                "/api/emails",
-                params={"mailbox": email_id, "limit": kwargs.get("limit", 20)},
-            )
-            if not isinstance(mails, list):
-                return []
-
-            messages = []
-            for mail in mails:
-                messages.append({
-                    "id": mail.get("id"),
-                    "from": mail.get("sender", ""),
-                    "subject": mail.get("subject", ""),
-                    "content": mail.get("preview", ""),
-                    "received_at": mail.get("created_at") or mail.get("createdAt"),
-                    "raw_data": mail,
-                })
-            return messages
-        except Exception as e:
-            logger.warning(f"获取 Freemail 邮件列表失败: {e}")
-            return []
-
-    def get_message_content(self, email_id: str, message_id: str) -> Optional[Dict[str, Any]]:
-        """获取 Freemail 邮件正文。"""
-        try:
-            detail = self._make_request("GET", f"/api/email/{message_id}")
-            return {
-                "id": message_id,
-                "content": str(detail.get("content", "")),
-                "html": str(detail.get("html_content", "")),
-                "subject": detail.get("subject", ""),
-                "from": detail.get("sender", ""),
-            }
-        except Exception as e:
-            logger.warning(f"获取 Freemail 邮件详情失败: {e}")
-            return None
-
     def delete_email(self, email_id: str) -> bool:
         """
         删除邮箱
@@ -362,10 +311,6 @@ class FreemailService(BaseEmailService):
             logger.warning(f"删除 Freemail 邮箱失败: {e}")
             self.update_status(False, e)
             return False
-
-    def list_domains(self) -> List[str]:
-        self._ensure_domains()
-        return [str(item).strip().lstrip("@") for item in self._domains if str(item).strip()]
 
     def check_health(self) -> bool:
         """检查服务健康状态"""

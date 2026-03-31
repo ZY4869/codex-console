@@ -4,7 +4,7 @@ CPA 服务管理 API 路由
 
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from ....database import crud
 from ....database.session import get_db
@@ -19,6 +19,7 @@ class CpaServiceCreate(BaseModel):
     name: str
     api_url: str
     api_token: str
+    proxy_url: Optional[str] = None
     enabled: bool = True
     priority: int = 0
 
@@ -27,6 +28,7 @@ class CpaServiceUpdate(BaseModel):
     name: Optional[str] = None
     api_url: Optional[str] = None
     api_token: Optional[str] = None
+    proxy_url: Optional[str] = None
     enabled: Optional[bool] = None
     priority: Optional[int] = None
 
@@ -35,14 +37,14 @@ class CpaServiceResponse(BaseModel):
     id: int
     name: str
     api_url: str
+    proxy_url: Optional[str] = None
     has_token: bool
     enabled: bool
     priority: int
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class CpaServiceTestRequest(BaseModel):
@@ -55,6 +57,7 @@ def _to_response(svc) -> CpaServiceResponse:
         id=svc.id,
         name=svc.name,
         api_url=svc.api_url,
+        proxy_url=getattr(svc, "proxy_url", None),
         has_token=bool(svc.api_token),
         enabled=svc.enabled,
         priority=svc.priority,
@@ -82,6 +85,7 @@ async def create_cpa_service(request: CpaServiceCreate):
             name=request.name,
             api_url=request.api_url,
             api_token=request.api_token,
+            proxy_url=request.proxy_url,
             enabled=request.enabled,
             priority=request.priority,
         )
@@ -110,6 +114,7 @@ async def get_cpa_service_full(service_id: int):
             "name": service.name,
             "api_url": service.api_url,
             "api_token": service.api_token,
+            "proxy_url": getattr(service, "proxy_url", None),
             "enabled": service.enabled,
             "priority": service.priority,
         }
@@ -131,6 +136,8 @@ async def update_cpa_service(service_id: int, request: CpaServiceUpdate):
         # api_token 留空则保持原值
         if request.api_token:
             update_data["api_token"] = request.api_token
+        if request.proxy_url is not None:
+            update_data["proxy_url"] = request.proxy_url
         if request.enabled is not None:
             update_data["enabled"] = request.enabled
         if request.priority is not None:

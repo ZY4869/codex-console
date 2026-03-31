@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 注册页面 JavaScript
  * 使用 utils.js 中的工具库
  */
@@ -8,22 +8,31 @@ let currentTask = null;
 let currentBatch = null;
 let logPollingInterval = null;
 let batchPollingInterval = null;
+let autoMonitorPollingInterval = null;
 let accountsPollingInterval = null;
+let todayStatsPollingInterval = null;
+let todayStatsResetInterval = null;
+let isBatchMode = false;
 let isOutlookBatchMode = false;
+let isAutoMode = false;
 let outlookAccounts = [];
+let editingScheduleJobUuid = null;
+let scheduledJobs = [];
 let taskCompleted = false;  // 标记任务是否已完成
 let batchCompleted = false;  // 标记批量任务是否已完成
 let taskFinalStatus = null;  // 保存任务的最终状态
 let batchFinalStatus = null;  // 保存批量任务的最终状态
 let displayedLogs = new Set();  // 用于日志去重
 let toastShown = false;  // 标记是否已显示过 toast
-let currentServiceOptions = null;
 let availableServices = {
     tempmail: { available: true, services: [] },
+    yyds_mail: { available: false, services: [] },
     outlook: { available: false, services: [] },
     moe_mail: { available: false, services: [] },
     temp_mail: { available: false, services: [] },
+    cloudmail: { available: false, services: [] },
     duck_mail: { available: false, services: [] },
+    luckmail: { available: false, services: [] },
     freemail: { available: false, services: [] },
     imap_mail: { available: false, services: [] }
 };
@@ -36,33 +45,24 @@ let wsHeartbeatInterval = null;  // 心跳定时器
 let batchWsHeartbeatInterval = null;  // 批量任务心跳定时器
 let activeTaskUuid = null;   // 当前活跃的单任务 UUID（用于页面重新可见时重连）
 let activeBatchId = null;    // 当前活跃的批量任务 ID（用于页面重新可见时重连）
+let wsReconnectTimer = null;
+let batchWsReconnectTimer = null;
+let wsReconnectAttempts = 0;
+let batchWsReconnectAttempts = 0;
+let wsManualClose = false;
+let batchWsManualClose = false;
+let autoMonitorLastLogIndex = 0;
+
+const WS_RECONNECT_BASE_DELAY = 1000;
+const WS_RECONNECT_MAX_DELAY = 10000;
 
 // DOM 元素
 const elements = {
     form: document.getElementById('registration-form'),
     emailService: document.getElementById('email-service'),
-    registrationSelectionGroup: document.getElementById('registration-selection-group'),
-    randomEmailService: document.getElementById('random-email-service'),
-    randomOutlookAccountGroup: document.getElementById('random-outlook-account-group'),
-    randomOutlookAccount: document.getElementById('random-outlook-account'),
-    randomDomainGroup: document.getElementById('random-domain-group'),
-    randomDomain: document.getElementById('random-domain'),
-    serviceOptionsSection: document.getElementById('service-options-section'),
-    refreshServiceOptionsBtn: document.getElementById('refresh-service-options-btn'),
-    serviceOptionsNote: document.getElementById('service-options-note'),
-    domainSelectGroup: document.getElementById('domain-select-group'),
-    domainSelect: document.getElementById('domain-select'),
-    domainSelectAllBtn: document.getElementById('domain-select-all-btn'),
-    domainSelectClearBtn: document.getElementById('domain-select-clear-btn'),
-    emailAddressSelectGroup: document.getElementById('email-address-select-group'),
-    emailAddressSelect: document.getElementById('email-address-select'),
-    emailAddressSelectAllBtn: document.getElementById('email-address-select-all-btn'),
-    emailAddressSelectClearBtn: document.getElementById('email-address-select-clear-btn'),
-    regProxy: document.getElementById('reg-proxy'),
-    testProxyBtn: document.getElementById('test-proxy-btn'),
-    proxyTestResult: document.getElementById('proxy-test-result'),
-    registrationMode: document.getElementById('reg-registration-mode'),
+    emailServiceGroup: document.getElementById('email-service')?.closest('.form-group'),
     regMode: document.getElementById('reg-mode'),
+    registrationType: document.getElementById('registration-type'),
     regModeGroup: document.getElementById('reg-mode-group'),
     batchCountGroup: document.getElementById('batch-count-group'),
     batchCount: document.getElementById('batch-count'),
@@ -81,6 +81,10 @@ const elements = {
     taskStatus: document.getElementById('task-status'),
     taskService: document.getElementById('task-service'),
     taskStatusBadge: document.getElementById('task-status-badge'),
+    autoMonitorStatusBadge: document.getElementById('auto-monitor-status-badge'),
+    autoMonitorLastChecked: document.getElementById('auto-monitor-last-checked'),
+    taskLastChecked: document.getElementById('task-last-checked'),
+    taskInventory: document.getElementById('task-inventory'),
     // 批量状态
     batchProgressText: document.getElementById('batch-progress-text'),
     batchProgressPercent: document.getElementById('batch-progress-percent'),
@@ -91,6 +95,12 @@ const elements = {
     // 已注册账号
     recentAccountsTable: document.getElementById('recent-accounts-table'),
     refreshAccountsBtn: document.getElementById('refresh-accounts-btn'),
+    // 今日统计
+    todayStatsTotal: document.getElementById('today-stats-total'),
+    todayStatsSuccess: document.getElementById('today-stats-success'),
+    todayStatsFailed: document.getElementById('today-stats-failed'),
+    todayStatsRate: document.getElementById('today-stats-rate'),
+    todayStatsReset: document.getElementById('today-stats-reset'),
     // Outlook 批量注册
     outlookBatchSection: document.getElementById('outlook-batch-section'),
     outlookAccountsContainer: document.getElementById('outlook-accounts-container'),
@@ -113,34 +123,67 @@ const elements = {
     autoUploadSub2api: document.getElementById('auto-upload-sub2api'),
     sub2apiServiceSelectGroup: document.getElementById('sub2api-service-select-group'),
     sub2apiServiceSelect: document.getElementById('sub2api-service-select'),
-    sub2apiGroupSummary: document.getElementById('sub2api-group-summary'),
-    sub2apiGroupSummaryContent: document.getElementById('sub2api-group-summary-content'),
     autoUploadTm: document.getElementById('auto-upload-tm'),
     tmServiceSelectGroup: document.getElementById('tm-service-select-group'),
     tmServiceSelect: document.getElementById('tm-service-select'),
+    autoUploadNewApi: document.getElementById('auto-upload-new-api'),
+    newApiServiceSelectGroup: document.getElementById('new-api-service-select-group'),
+    newApiServiceSelect: document.getElementById('new-api-service-select'),
+    scheduleForm: document.getElementById('schedule-form'),
+    scheduleName: document.getElementById('schedule-name'),
+    scheduleTriggerType: document.getElementById('schedule-trigger-type'),
+    scheduleEnabled: document.getElementById('schedule-enabled'),
+    scheduleIntervalFields: document.getElementById('schedule-interval-fields'),
+    scheduleIntervalMinutes: document.getElementById('schedule-interval-minutes'),
+    scheduleTimepointFields: document.getElementById('schedule-timepoint-fields'),
+    scheduleEveryNDays: document.getElementById('schedule-every-n-days'),
+    scheduleTimeOfDay: document.getElementById('schedule-time-of-day'),
+    scheduleStartDate: document.getElementById('schedule-start-date'),
+    saveScheduleBtn: document.getElementById('save-schedule-btn'),
+    cancelScheduleEditBtn: document.getElementById('cancel-schedule-edit-btn'),
+    refreshSchedulesBtn: document.getElementById('refresh-schedules-btn'),
+    scheduleJobsTable: document.getElementById('schedule-jobs-table'),
+    autoRegistrationSection: document.getElementById('auto-registration-section'),
+    autoRegistrationEnabled: document.getElementById('auto-registration-enabled'),
+    autoRegistrationCheckInterval: document.getElementById('auto-registration-check-interval'),
+    autoRegistrationMinReady: document.getElementById('auto-registration-min-ready'),
+    autoRegistrationCpaServiceId: document.getElementById('auto-registration-cpa-service-id'),
+    autoRegistrationEmailServiceType: document.getElementById('auto-registration-email-service-type'),
+    autoRegistrationEmailServiceId: document.getElementById('auto-registration-email-service-id'),
+    autoRegistrationProxy: document.getElementById('auto-registration-proxy'),
+    autoRegistrationMode: document.getElementById('auto-registration-mode'),
+    autoRegistrationConcurrency: document.getElementById('auto-registration-concurrency'),
+    autoRegistrationIntervalGroup: document.getElementById('auto-registration-interval-group'),
+    autoRegistrationIntervalMin: document.getElementById('auto-registration-interval-min'),
+    autoRegistrationIntervalMax: document.getElementById('auto-registration-interval-max'),
 };
-
-let sub2apiUploadServices = [];
-const sub2apiUploadGroupCache = new Map();
-let sub2apiGroupSummaryRequestId = 0;
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
     initEventListeners();
+    handleModeChange({ target: elements.regMode });
     loadAvailableServices();
     loadRecentAccounts();
+    loadAutoRegistrationSettings();
+    loadAutoRegistrationCpaOptions();
     startAccountsPolling();
+    loadTodayStats(true);
+    startTodayStatsPolling();
+    startTodayStatsResetTicker();
     initVisibilityReconnect();
     restoreActiveTask();
     initAutoUploadOptions();
+    initScheduleForm();
+    loadScheduledJobs();
 });
 
-// 初始化注册后自动操作选项（CPA / Sub2API / TM）
+// 初始化注册后自动操作选项（CPA / Sub2API / TM / new-api）
 async function initAutoUploadOptions() {
     await Promise.all([
         loadServiceSelect('/cpa-services?enabled=true', elements.cpaServiceSelect, elements.autoUploadCpa, elements.cpaServiceSelectGroup),
         loadServiceSelect('/sub2api-services?enabled=true', elements.sub2apiServiceSelect, elements.autoUploadSub2api, elements.sub2apiServiceSelectGroup),
         loadServiceSelect('/tm-services?enabled=true', elements.tmServiceSelect, elements.autoUploadTm, elements.tmServiceSelectGroup),
+        loadServiceSelect('/new-api-services?enabled=true', elements.newApiServiceSelect, elements.autoUploadNewApi, elements.newApiServiceSelectGroup),
     ]);
 }
 
@@ -151,10 +194,6 @@ async function loadServiceSelect(apiPath, container, checkbox, selectGroup) {
     try {
         services = await api.get(apiPath);
     } catch (e) {}
-
-    if (container === elements.sub2apiServiceSelect) {
-        sub2apiUploadServices = Array.isArray(services) ? services : [];
-    }
 
     if (!services || services.length === 0) {
         checkbox.disabled = true;
@@ -179,12 +218,7 @@ async function loadServiceSelect(apiPath, container, checkbox, selectGroup) {
             </div>`;
         // 监听 checkbox 变化，更新触发器文字
         container.querySelectorAll('.msd-item input').forEach(cb => {
-            cb.addEventListener('change', () => {
-                updateMsdLabel(container.id + '-dd');
-                if (container === elements.sub2apiServiceSelect) {
-                    updateSub2ApiGroupSummary();
-                }
-            });
+            cb.addEventListener('change', () => updateMsdLabel(container.id + '-dd'));
         });
         // 点击外部关闭
         document.addEventListener('click', (e) => {
@@ -196,14 +230,7 @@ async function loadServiceSelect(apiPath, container, checkbox, selectGroup) {
     // 联动显示/隐藏服务选择区
     checkbox.addEventListener('change', () => {
         if (selectGroup) selectGroup.style.display = checkbox.checked ? 'block' : 'none';
-        if (container === elements.sub2apiServiceSelect) {
-            updateSub2ApiGroupSummary();
-        }
     });
-
-    if (container === elements.sub2apiServiceSelect) {
-        updateSub2ApiGroupSummary();
-    }
 }
 
 function toggleMsd(ddId) {
@@ -229,255 +256,6 @@ function getSelectedServiceIds(container) {
     return Array.from(container.querySelectorAll('.msd-item input:checked')).map(cb => parseInt(cb.value));
 }
 
-function renderSub2ApiGroupSummaryRows(rows) {
-    if (!elements.sub2apiGroupSummaryContent) return;
-    if (!rows.length) {
-        elements.sub2apiGroupSummaryContent.textContent = '未选择 Sub2API 服务';
-        return;
-    }
-
-    elements.sub2apiGroupSummaryContent.innerHTML = rows.map((row, index) => `
-        <div style="padding:${index === 0 ? '0 0 6px 0' : '6px 0 0 0'};${index === 0 ? '' : ' border-top: 1px solid var(--border-light);'}">
-            <div style="font-weight:500; color:var(--text-primary);">${escapeHtml(row.serviceName)}</div>
-            <div style="color:var(--text-muted);">${escapeHtml(row.groupText)}</div>
-        </div>
-    `).join('');
-}
-
-async function loadSub2ApiGroupMap(serviceId) {
-    const numericServiceId = parseInt(serviceId, 10);
-    if (!Number.isFinite(numericServiceId)) return new Map();
-
-    if (sub2apiUploadGroupCache.has(numericServiceId)) {
-        return sub2apiUploadGroupCache.get(numericServiceId);
-    }
-
-    const groups = await api.post('/sub2api-services/fetch-groups', { service_id: numericServiceId });
-    const groupMap = new Map(
-        (Array.isArray(groups) ? groups : []).map(group => [parseInt(group.id, 10), group.name || `ID ${group.id}`])
-    );
-    sub2apiUploadGroupCache.set(numericServiceId, groupMap);
-    return groupMap;
-}
-
-async function updateSub2ApiGroupSummary() {
-    if (!elements.sub2apiGroupSummary || !elements.sub2apiGroupSummaryContent) return;
-
-    if (!elements.autoUploadSub2api || !elements.autoUploadSub2api.checked) {
-        elements.sub2apiGroupSummary.style.display = 'none';
-        return;
-    }
-
-    elements.sub2apiGroupSummary.style.display = 'block';
-    const selectedIds = getSelectedServiceIds(elements.sub2apiServiceSelect);
-    const selectedServices = sub2apiUploadServices.filter(service => selectedIds.includes(parseInt(service.id, 10)));
-
-    if (!selectedServices.length) {
-        elements.sub2apiGroupSummaryContent.textContent = '未选择 Sub2API 服务';
-        return;
-    }
-
-    const requestId = ++sub2apiGroupSummaryRequestId;
-    elements.sub2apiGroupSummaryContent.textContent = '正在读取默认分组...';
-
-    const rows = await Promise.all(selectedServices.map(async (service) => {
-        const groupIds = (service.template_config?.default_group_ids || [])
-            .map(id => parseInt(id, 10))
-            .filter(Number.isFinite);
-
-        if (!groupIds.length) {
-            return {
-                serviceName: service.name,
-                groupText: '未配置默认分组',
-            };
-        }
-
-        try {
-            const groupMap = await loadSub2ApiGroupMap(service.id);
-            return {
-                serviceName: service.name,
-                groupText: groupIds.map(groupId => groupMap.get(groupId) || `ID ${groupId}`).join('、'),
-            };
-        } catch (error) {
-            return {
-                serviceName: service.name,
-                groupText: groupIds.map(groupId => `ID ${groupId}`).join('、'),
-            };
-        }
-    }));
-
-    if (requestId !== sub2apiGroupSummaryRequestId) return;
-    renderSub2ApiGroupSummaryRows(rows);
-}
-
-function renderMultiSelect(container, items, emptyText = '暂无可选项') {
-    if (!container) return;
-
-    if (!items || items.length === 0) {
-        container.innerHTML = `<div class="msd-empty">${emptyText}</div>`;
-        return;
-    }
-
-    const itemHtml = items.map(item => `
-        <label class="msd-item">
-            <input type="checkbox" value="${escapeHtml(item.value)}" ${item.checked ? 'checked' : ''}>
-            <span>${escapeHtml(item.text)}</span>
-        </label>
-    `).join('');
-
-    container.innerHTML = `
-        <div class="msd-dropdown" id="${container.id}-dd">
-            <div class="msd-trigger" onclick="toggleMsd('${container.id}-dd')">
-                <span class="msd-label">未选择</span>
-                <span class="msd-arrow">▼</span>
-            </div>
-            <div class="msd-list">${itemHtml}</div>
-        </div>
-    `;
-
-    container.querySelectorAll('.msd-item input').forEach(cb => {
-        cb.addEventListener('change', () => updateMsdLabel(`${container.id}-dd`));
-    });
-
-    document.addEventListener('click', (e) => {
-        const dd = document.getElementById(`${container.id}-dd`);
-        if (dd && !dd.contains(e.target)) dd.classList.remove('open');
-    }, true);
-
-    updateMsdLabel(`${container.id}-dd`);
-}
-
-function getSelectedDropdownValues(container) {
-    if (!container) return [];
-    return Array.from(container.querySelectorAll('.msd-item input:checked')).map(cb => cb.value);
-}
-
-function setDropdownValues(container, checked) {
-    if (!container) return;
-    container.querySelectorAll('.msd-item input').forEach(cb => {
-        cb.checked = checked;
-    });
-    updateMsdLabel(`${container.id}-dd`);
-}
-
-function setServiceOptionsNote(message = '', isWarning = false) {
-    if (!elements.serviceOptionsNote) return;
-    if (!message) {
-        elements.serviceOptionsNote.style.display = 'none';
-        elements.serviceOptionsNote.textContent = '';
-        elements.serviceOptionsNote.style.color = 'var(--text-muted)';
-        return;
-    }
-
-    elements.serviceOptionsNote.style.display = 'block';
-    elements.serviceOptionsNote.textContent = message;
-    elements.serviceOptionsNote.style.color = isWarning ? 'var(--warning-color)' : 'var(--text-muted)';
-}
-
-function buildSelectionStrategyNotes(domains, emailAddresses) {
-    const notes = [];
-
-    if (domains.length > 1) {
-        notes.push('域名只有勾选“随机选域名”后才会随机；未勾选时，单次注册使用第 1 个选中域名，批量注册按所选顺序轮转');
-    }
-
-    if (emailAddresses.length > 0) {
-        notes.push('邮箱地址列表来自邮箱 API；多选地址默认按顺序轮转，不会随机。“随机选 Outlook 账号”只影响 Outlook 账号选择');
-    }
-
-    notes.push('不勾选任何地址或域名时，系统会沿用邮箱服务当前的默认创建逻辑');
-    return notes;
-}
-
-function updateCheckboxAvailability(input, enabled) {
-    if (!input) return;
-    input.disabled = !enabled;
-    if (!enabled) input.checked = false;
-    const label = input.closest('label');
-    if (label) {
-        label.style.opacity = enabled ? '1' : '0.6';
-    }
-}
-
-function resetRegistrationServiceOptions() {
-    currentServiceOptions = null;
-    updateCheckboxAvailability(elements.randomEmailService, false);
-    elements.randomOutlookAccountGroup.style.display = 'none';
-    elements.randomDomainGroup.style.display = 'none';
-    if (elements.randomOutlookAccount) elements.randomOutlookAccount.checked = false;
-    if (elements.randomDomain) elements.randomDomain.checked = false;
-    if (elements.domainSelect) elements.domainSelect.innerHTML = '';
-    if (elements.emailAddressSelect) elements.emailAddressSelect.innerHTML = '';
-    if (elements.domainSelectGroup) elements.domainSelectGroup.style.display = 'none';
-    if (elements.emailAddressSelectGroup) elements.emailAddressSelectGroup.style.display = 'none';
-    if (elements.serviceOptionsSection) elements.serviceOptionsSection.style.display = 'none';
-    setServiceOptionsNote('');
-}
-
-async function loadRegistrationServiceOptions() {
-    const selectedValue = elements.emailService.value;
-    if (!selectedValue) {
-        resetRegistrationServiceOptions();
-        return;
-    }
-
-    const [type, id] = selectedValue.split(':');
-    if (type === 'outlook_batch') {
-        resetRegistrationServiceOptions();
-        return;
-    }
-
-    resetRegistrationServiceOptions();
-
-    try {
-        const params = new URLSearchParams({ service_type: type });
-        if (id && id !== 'default') {
-            params.set('service_id', id);
-        }
-
-        const data = await api.get(`/registration/service-options?${params.toString()}`);
-        currentServiceOptions = data;
-
-        updateCheckboxAvailability(elements.randomEmailService, !!data.supports_random_service);
-        elements.randomOutlookAccountGroup.style.display = data.supports_random_outlook_account ? 'flex' : 'none';
-        elements.randomDomainGroup.style.display = data.supports_random_domain ? 'flex' : 'none';
-
-        const domains = (data.domains || []).map(domain => ({
-            value: domain,
-            text: `@${domain}`,
-            checked: false,
-        }));
-        const emailAddresses = (data.email_addresses || []).map(item => ({
-            value: item.email,
-            text: item.is_registered ? `${item.email} (已注册)` : item.email,
-            checked: false,
-        }));
-
-        if (domains.length > 1) {
-            renderMultiSelect(elements.domainSelect, domains, '暂无可选域名');
-            elements.domainSelectGroup.style.display = 'block';
-        }
-
-        if (emailAddresses.length > 0) {
-            renderMultiSelect(elements.emailAddressSelect, emailAddresses, '暂无可选邮箱地址');
-            elements.emailAddressSelectGroup.style.display = 'block';
-        }
-
-        const notes = data.notes || [];
-        const helperNotes = buildSelectionStrategyNotes(domains, emailAddresses);
-        setServiceOptionsNote(
-            [...notes, ...helperNotes].filter(Boolean).join('；'),
-            notes.length > 0
-        );
-
-        const shouldShowSection = emailAddresses.length > 0 || domains.length > 1 || notes.length > 0;
-        elements.serviceOptionsSection.style.display = shouldShowSection ? 'block' : 'none';
-    } catch (error) {
-        setServiceOptionsNote(`读取邮箱地址或域名失败: ${error.message}`, true);
-        elements.serviceOptionsSection.style.display = 'block';
-    }
-}
-
 // 事件监听
 function initEventListeners() {
     // 注册表单提交
@@ -488,69 +266,21 @@ function initEventListeners() {
 
     // 邮箱服务切换
     elements.emailService.addEventListener('change', handleServiceChange);
-    if (elements.refreshServiceOptionsBtn) {
-        elements.refreshServiceOptionsBtn.addEventListener('click', loadRegistrationServiceOptions);
+    if (elements.autoRegistrationEmailServiceType) {
+        elements.autoRegistrationEmailServiceType.addEventListener('change', () => populateAutoRegistrationEmailServiceOptions(0));
     }
-    if (elements.domainSelectAllBtn) {
-        elements.domainSelectAllBtn.addEventListener('click', () => setDropdownValues(elements.domainSelect, true));
-    }
-    if (elements.domainSelectClearBtn) {
-        elements.domainSelectClearBtn.addEventListener('click', () => setDropdownValues(elements.domainSelect, false));
-    }
-    if (elements.emailAddressSelectAllBtn) {
-        elements.emailAddressSelectAllBtn.addEventListener('click', () => setDropdownValues(elements.emailAddressSelect, true));
-    }
-    if (elements.emailAddressSelectClearBtn) {
-        elements.emailAddressSelectClearBtn.addEventListener('click', () => setDropdownValues(elements.emailAddressSelect, false));
+    if (elements.autoRegistrationMode) {
+        elements.autoRegistrationMode.addEventListener('change', () => {
+            handleConcurrencyModeChange(
+                elements.autoRegistrationMode,
+                elements.concurrencyHint,
+                elements.autoRegistrationIntervalGroup
+            );
+        });
     }
 
     // 取消按钮
     elements.cancelBtn.addEventListener('click', handleCancelTask);
-
-    // 测试代理
-    if (elements.testProxyBtn) {
-        elements.testProxyBtn.addEventListener('click', async () => {
-            const raw = elements.regProxy ? elements.regProxy.value.trim() : '';
-            const resultEl = elements.proxyTestResult;
-            if (!raw) {
-                if (resultEl) {
-                    resultEl.style.display = 'block';
-                    resultEl.style.color = 'var(--warning-color)';
-                    resultEl.textContent = '请先输入代理地址';
-                }
-                return;
-            }
-            elements.testProxyBtn.disabled = true;
-            elements.testProxyBtn.textContent = '测试中...';
-            if (resultEl) {
-                resultEl.style.display = 'block';
-                resultEl.style.color = 'var(--text-muted)';
-                resultEl.textContent = '正在连接...';
-            }
-            try {
-                const resp = await fetch('/api/registration/proxy/test', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ proxy: raw }),
-                });
-                const data = await resp.json();
-                if (resultEl) {
-                    resultEl.style.display = 'block';
-                    resultEl.style.color = data.success ? 'var(--success-color)' : 'var(--error-color)';
-                    resultEl.textContent = data.message || (data.success ? '代理可用' : '代理不可用');
-                }
-            } catch (e) {
-                if (resultEl) {
-                    resultEl.style.display = 'block';
-                    resultEl.style.color = 'var(--error-color)';
-                    resultEl.textContent = '请求失败: ' + e.message;
-                }
-            } finally {
-                elements.testProxyBtn.disabled = false;
-                elements.testProxyBtn.textContent = '测试';
-            }
-        });
-    }
 
     // 清空日志
     elements.clearLogBtn.addEventListener('click', () => {
@@ -571,6 +301,10 @@ function initEventListeners() {
     elements.outlookConcurrencyMode.addEventListener('change', () => {
         handleConcurrencyModeChange(elements.outlookConcurrencyMode, elements.outlookConcurrencyHint, elements.outlookIntervalGroup);
     });
+
+    if (elements.refreshSchedulesBtn) {
+        elements.refreshSchedulesBtn.addEventListener('click', () => loadScheduledJobs());
+    }
 }
 
 // 加载可用的邮箱服务
@@ -581,7 +315,14 @@ async function loadAvailableServices() {
 
         // 更新邮箱服务选择框
         updateEmailServiceOptions();
-        await handleServiceChange({ target: elements.emailService });
+        populateAutoRegistrationEmailServiceOptions(parseInt(elements.autoRegistrationEmailServiceId?.value || '0', 10) || 0);
+
+        if (editingScheduleJobUuid) {
+            const currentJob = scheduledJobs.find(item => item.job_uuid === editingScheduleJobUuid);
+            if (currentJob) {
+                setRegistrationConfigToForm(currentJob.registration_config || {});
+            }
+        }
 
         addLog('info', '[系统] 邮箱服务列表已加载');
     } catch (error) {
@@ -595,18 +336,31 @@ function updateEmailServiceOptions() {
     const select = elements.emailService;
     select.innerHTML = '';
 
-    // Tempmail
-    if (availableServices.tempmail.available) {
+    // 官方临时邮箱渠道
+    if ((availableServices.tempmail && availableServices.tempmail.available) ||
+        (availableServices.yyds_mail && availableServices.yyds_mail.available)) {
         const optgroup = document.createElement('optgroup');
         optgroup.label = '🌐 临时邮箱';
 
-        availableServices.tempmail.services.forEach(service => {
-            const option = document.createElement('option');
-            option.value = `tempmail:${service.id || 'default'}`;
-            option.textContent = service.name;
-            option.dataset.type = 'tempmail';
-            optgroup.appendChild(option);
-        });
+        if (availableServices.tempmail && availableServices.tempmail.available) {
+            availableServices.tempmail.services.forEach(service => {
+                const option = document.createElement('option');
+                option.value = `tempmail:${service.id || 'default'}`;
+                option.textContent = service.name;
+                option.dataset.type = 'tempmail';
+                optgroup.appendChild(option);
+            });
+        }
+
+        if (availableServices.yyds_mail && availableServices.yyds_mail.available) {
+            availableServices.yyds_mail.services.forEach(service => {
+                const option = document.createElement('option');
+                option.value = `yyds_mail:${service.id || 'default'}`;
+                option.textContent = service.name + (service.default_domain ? ` (@${service.default_domain})` : '');
+                option.dataset.type = 'yyds_mail';
+                optgroup.appendChild(option);
+            });
+        }
 
         select.appendChild(optgroup);
     }
@@ -693,6 +447,23 @@ function updateEmailServiceOptions() {
         select.appendChild(optgroup);
     }
 
+    // CloudMail
+    if (availableServices.cloudmail && availableServices.cloudmail.available) {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = `☁️ CloudMail (${availableServices.cloudmail.count} 个服务)`;
+
+        availableServices.cloudmail.services.forEach(service => {
+            const option = document.createElement('option');
+            option.value = `cloudmail:${service.id}`;
+            option.textContent = service.name + (service.domain ? ` (@${service.domain})` : '');
+            option.dataset.type = 'cloudmail';
+            option.dataset.serviceId = service.id;
+            optgroup.appendChild(option);
+        });
+
+        select.appendChild(optgroup);
+    }
+
     // DuckMail
     if (availableServices.duck_mail && availableServices.duck_mail.available) {
         const optgroup = document.createElement('optgroup');
@@ -703,6 +474,23 @@ function updateEmailServiceOptions() {
             option.value = `duck_mail:${service.id}`;
             option.textContent = service.name + (service.default_domain ? ` (@${service.default_domain})` : '');
             option.dataset.type = 'duck_mail';
+            option.dataset.serviceId = service.id;
+            optgroup.appendChild(option);
+        });
+
+        select.appendChild(optgroup);
+    }
+
+    // LuckMail
+    if (availableServices.luckmail && availableServices.luckmail.available) {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = `✉️ LuckMail (${availableServices.luckmail.count} 个服务)`;
+
+        availableServices.luckmail.services.forEach(service => {
+            const option = document.createElement('option');
+            option.value = `luckmail:${service.id}`;
+            option.textContent = service.name + (service.preferred_domain ? ` (@${service.preferred_domain})` : '');
+            option.dataset.type = 'luckmail';
             option.dataset.serviceId = service.id;
             optgroup.appendChild(option);
         });
@@ -730,7 +518,7 @@ function updateEmailServiceOptions() {
     // IMAP 邮箱
     if (availableServices.imap_mail && availableServices.imap_mail.available) {
         const optgroup = document.createElement('optgroup');
-        optgroup.label = `📮 IMAP 邮箱 (${availableServices.imap_mail.count} 个服务)`;
+        optgroup.label = `📨 IMAP 邮箱 (${availableServices.imap_mail.count} 个服务)`;
 
         availableServices.imap_mail.services.forEach(service => {
             const option = document.createElement('option');
@@ -746,25 +534,25 @@ function updateEmailServiceOptions() {
 }
 
 // 处理邮箱服务切换
-async function handleServiceChange(e) {
+function handleServiceChange(e) {
     const value = e.target.value;
-    if (!value) {
-        resetRegistrationServiceOptions();
-        return;
-    }
+    if (!value) return;
 
     const [type, id] = value.split(':');
     // 处理 Outlook 批量注册模式
     if (type === 'outlook_batch') {
         isOutlookBatchMode = true;
-        syncRegistrationSectionsForServiceMode();
-        resetRegistrationServiceOptions();
+        elements.outlookBatchSection.style.display = 'block';
+        elements.regModeGroup.style.display = 'none';
+        elements.batchCountGroup.style.display = 'none';
+        elements.batchOptions.style.display = 'none';
         loadOutlookAccounts();
         addLog('info', '[系统] 已切换到 Outlook 批量注册模式');
         return;
     } else {
         isOutlookBatchMode = false;
-        syncRegistrationSectionsForServiceMode();
+        elements.outlookBatchSection.style.display = 'none';
+        elements.regModeGroup.style.display = 'block';
     }
 
     // 显示服务信息
@@ -772,6 +560,11 @@ async function handleServiceChange(e) {
         const service = availableServices.outlook.services.find(s => s.id == id);
         if (service) {
             addLog('info', `[系统] 已选择 Outlook 账户: ${service.name}`);
+        }
+    } else if (type === 'yyds_mail') {
+        const service = availableServices.yyds_mail.services.find(s => (s.id || 'default') == id);
+        if (service) {
+            addLog('info', `[系统] 已选择 YYDS Mail 渠道: ${service.name}`);
         }
     } else if (type === 'moe_mail') {
         const service = availableServices.moe_mail.services.find(s => s.id == id);
@@ -783,10 +576,20 @@ async function handleServiceChange(e) {
         if (service) {
             addLog('info', `[系统] 已选择 Temp-Mail 自部署服务: ${service.name}`);
         }
+    } else if (type === 'cloudmail') {
+        const service = availableServices.cloudmail.services.find(s => s.id == id);
+        if (service) {
+            addLog('info', `[系统] 已选择 CloudMail 服务: ${service.name}`);
+        }
     } else if (type === 'duck_mail') {
         const service = availableServices.duck_mail.services.find(s => s.id == id);
         if (service) {
             addLog('info', `[系统] 已选择 DuckMail 服务: ${service.name}`);
+        }
+    } else if (type === 'luckmail') {
+        const service = availableServices.luckmail.services.find(s => s.id == id);
+        if (service) {
+            addLog('info', `[系统] 已选择 LuckMail 服务: ${service.name}`);
         }
     } else if (type === 'freemail') {
         const service = availableServices.freemail.services.find(s => s.id == id);
@@ -799,54 +602,35 @@ async function handleServiceChange(e) {
             addLog('info', `[系统] 已选择 IMAP 邮箱服务: ${service.name}`);
         }
     }
-
-    await loadRegistrationServiceOptions();
-}
-
-// 普通注册模式状态同步
-function getNormalRegistrationMode() {
-    return elements.regMode && elements.regMode.value === 'batch' ? 'batch' : 'single';
-}
-
-function setNormalRegistrationMode(mode) {
-    if (elements.regMode) {
-        elements.regMode.value = mode === 'batch' ? 'batch' : 'single';
-    }
-}
-
-function isNormalBatchMode() {
-    return !isOutlookBatchMode && getNormalRegistrationMode() === 'batch';
-}
-
-function syncNormalRegistrationModeUI(mode = getNormalRegistrationMode()) {
-    const showBatchOptions = !isOutlookBatchMode && mode === 'batch';
-    elements.batchCountGroup.style.display = showBatchOptions ? 'block' : 'none';
-    elements.batchOptions.style.display = showBatchOptions ? 'block' : 'none';
-}
-
-function syncRegistrationSectionsForServiceMode() {
-    if (isOutlookBatchMode) {
-        elements.outlookBatchSection.style.display = 'block';
-        elements.regModeGroup.style.display = 'none';
-        elements.batchCountGroup.style.display = 'none';
-        elements.batchOptions.style.display = 'none';
-        if (elements.registrationSelectionGroup) {
-            elements.registrationSelectionGroup.style.display = 'none';
-        }
-        return;
-    }
-
-    elements.outlookBatchSection.style.display = 'none';
-    elements.regModeGroup.style.display = 'block';
-    if (elements.registrationSelectionGroup) {
-        elements.registrationSelectionGroup.style.display = 'block';
-    }
-    syncNormalRegistrationModeUI();
 }
 
 // 模式切换
 function handleModeChange(e) {
-    syncNormalRegistrationModeUI(e.target.value);
+    const mode = e.target.value;
+    isAutoMode = mode === 'auto';
+    isBatchMode = mode === 'batch';
+
+    elements.batchCountGroup.style.display = isBatchMode ? 'block' : 'none';
+    elements.batchOptions.style.display = isBatchMode ? 'block' : 'none';
+    if (elements.autoRegistrationSection) {
+        elements.autoRegistrationSection.style.display = isAutoMode ? 'block' : 'none';
+    }
+    if (elements.emailServiceGroup) {
+        elements.emailServiceGroup.style.display = isAutoMode ? 'none' : 'block';
+    }
+    const autoUploadGroup = elements.autoUploadCpa?.closest('#auto-upload-group');
+    if (autoUploadGroup) {
+        autoUploadGroup.style.display = isAutoMode ? 'none' : 'block';
+    }
+    elements.startBtn.textContent = isAutoMode ? '💾 保存自动注册设置' : '🚀 开始注册';
+
+    if (isAutoMode) {
+        elements.cancelBtn.disabled = false;
+    } else {
+        stopAutoRegistrationMonitor();
+        updateAutoMonitorHeader('idle', null);
+        elements.cancelBtn.disabled = true;
+    }
 }
 
 // 并发模式切换（批量）
@@ -861,9 +645,362 @@ function handleConcurrencyModeChange(selectEl, hintEl, intervalGroupEl) {
     }
 }
 
+function initScheduleForm() {
+    if (!elements.scheduleForm) return;
+    if (!elements.scheduleStartDate.value) {
+        elements.scheduleStartDate.value = new Date().toISOString().slice(0, 10);
+    }
+    elements.scheduleForm.addEventListener('submit', handleScheduleSubmit);
+    elements.scheduleTriggerType.addEventListener('change', updateScheduleTriggerFields);
+    elements.cancelScheduleEditBtn.addEventListener('click', resetScheduleForm);
+    updateScheduleTriggerFields();
+}
+
+function updateScheduleTriggerFields() {
+    if (!elements.scheduleTriggerType) return;
+    const triggerType = elements.scheduleTriggerType.value;
+    elements.scheduleIntervalFields.style.display = triggerType === 'interval' ? 'block' : 'none';
+    elements.scheduleTimepointFields.style.display = triggerType === 'timepoint' ? 'block' : 'none';
+}
+
+function buildCurrentRegistrationConfig() {
+    const selectedValue = elements.emailService.value;
+    if (!selectedValue) {
+        throw new Error('请选择一个邮箱服务');
+    }
+
+    isBatchMode = elements.regMode.value == "batch"
+
+    const [emailServiceType, serviceId] = selectedValue.split(':');
+    const baseConfig = {
+        email_service_type: emailServiceType,
+        registration_type: elements.registrationType ? elements.registrationType.value : 'child',
+        reg_mode: isOutlookBatchMode ? 'outlook_batch' : (isBatchMode ? 'batch' : 'single'),
+        auto_upload_cpa: elements.autoUploadCpa ? elements.autoUploadCpa.checked : false,
+        cpa_service_ids: elements.autoUploadCpa && elements.autoUploadCpa.checked ? getSelectedServiceIds(elements.cpaServiceSelect) : [],
+        auto_upload_sub2api: elements.autoUploadSub2api ? elements.autoUploadSub2api.checked : false,
+        sub2api_service_ids: elements.autoUploadSub2api && elements.autoUploadSub2api.checked ? getSelectedServiceIds(elements.sub2apiServiceSelect) : [],
+        auto_upload_tm: elements.autoUploadTm ? elements.autoUploadTm.checked : false,
+        tm_service_ids: elements.autoUploadTm && elements.autoUploadTm.checked ? getSelectedServiceIds(elements.tmServiceSelect) : [],
+        auto_upload_new_api: elements.autoUploadNewApi ? elements.autoUploadNewApi.checked : false,
+        new_api_service_ids: elements.autoUploadNewApi && elements.autoUploadNewApi.checked ? getSelectedServiceIds(elements.newApiServiceSelect) : [],
+    };
+
+    if (isOutlookBatchMode) {
+        const selectedIds = [];
+        document.querySelectorAll('.outlook-account-checkbox:checked').forEach(cb => {
+            selectedIds.push(parseInt(cb.value));
+        });
+        return {
+            ...baseConfig,
+            email_service_type: 'outlook_batch',
+            service_ids: selectedIds,
+            skip_registered: elements.outlookSkipRegistered.checked,
+            interval_min: parseInt(elements.outlookIntervalMin.value) || 5,
+            interval_max: parseInt(elements.outlookIntervalMax.value) || 30,
+            concurrency: Math.min(50, Math.max(1, parseInt(elements.outlookConcurrencyCount.value) || 3)),
+            mode: elements.outlookConcurrencyMode.value || 'pipeline',
+        };
+    }
+
+    if (serviceId && serviceId !== 'default') {
+        baseConfig.email_service_id = parseInt(serviceId);
+    }
+
+    if (isBatchMode) {
+        return {
+            ...baseConfig,
+            batch_count: parseInt(elements.batchCount.value) || 1,
+            interval_min: parseInt(elements.intervalMin.value) || 5,
+            interval_max: parseInt(elements.intervalMax.value) || 30,
+            concurrency: Math.min(50, Math.max(1, parseInt(elements.concurrencyCount.value) || 1)),
+            mode: elements.concurrencyMode.value || 'pipeline',
+        };
+    }
+
+    return baseConfig;
+}
+
+function buildScheduleConfig() {
+    const triggerType = elements.scheduleTriggerType.value;
+    if (triggerType === 'interval') {
+        return {
+            schedule_type: 'interval',
+            schedule_config: {
+                interval_minutes: parseInt(elements.scheduleIntervalMinutes.value) || 1,
+            },
+        };
+    }
+
+    return {
+        schedule_type: 'timepoint',
+        schedule_config: {
+            every_n_days: parseInt(elements.scheduleEveryNDays.value) || 1,
+            time_of_day: elements.scheduleTimeOfDay.value || '09:00',
+            start_date: elements.scheduleStartDate.value || null,
+        },
+    };
+}
+
+async function handleScheduleSubmit(e) {
+    e.preventDefault();
+
+    try {
+        const registrationConfig = buildCurrentRegistrationConfig();
+        if (registrationConfig.email_service_type === 'outlook_batch' && (!registrationConfig.service_ids || registrationConfig.service_ids.length === 0)) {
+            toast.error('请至少选择一个 Outlook 账户后再保存计划');
+            return;
+        }
+
+        const { schedule_type, schedule_config } = buildScheduleConfig();
+        const payload = {
+            name: (elements.scheduleName.value || '').trim(),
+            enabled: elements.scheduleEnabled.value === 'true',
+            schedule_type,
+            schedule_config,
+            registration_config: registrationConfig,
+            timezone: 'local',
+        };
+
+        if (!payload.name) {
+            toast.error('请输入计划名称');
+            return;
+        }
+
+        const endpoint = editingScheduleJobUuid
+            ? `/registration/schedules/${editingScheduleJobUuid}`
+            : '/registration/schedules';
+        const method = editingScheduleJobUuid ? 'put' : 'post';
+
+        await api[method](endpoint, payload);
+        toast.success(editingScheduleJobUuid ? '计划任务已更新' : '计划任务已创建');
+        resetScheduleForm();
+        await loadScheduledJobs();
+    } catch (error) {
+        toast.error(error.message);
+    }
+}
+
+function resetScheduleForm() {
+    editingScheduleJobUuid = null;
+    if (!elements.scheduleForm) return;
+    elements.scheduleForm.reset();
+    elements.scheduleEnabled.value = 'true';
+    elements.scheduleTriggerType.value = 'interval';
+    elements.scheduleIntervalMinutes.value = '60';
+    elements.scheduleEveryNDays.value = '1';
+    elements.scheduleTimeOfDay.value = '09:00';
+    elements.scheduleStartDate.value = new Date().toISOString().slice(0, 10);
+    elements.saveScheduleBtn.textContent = '保存计划任务';
+    elements.cancelScheduleEditBtn.style.display = 'none';
+    updateScheduleTriggerFields();
+}
+
+function setRegistrationConfigToForm(config) {
+    const registrationConfig = config || {};
+    const emailServiceType = registrationConfig.email_service_type || 'tempmail';
+    const emailServiceId = registrationConfig.email_service_id;
+    const serviceValue = emailServiceType === 'outlook_batch'
+        ? 'outlook_batch:all'
+        : `${emailServiceType}:${emailServiceId ?? 'default'}`;
+
+    elements.emailService.value = serviceValue;
+    handleServiceChange({ target: elements.emailService });
+
+    elements.autoUploadCpa.checked = !!registrationConfig.auto_upload_cpa;
+    elements.cpaServiceSelectGroup.style.display = elements.autoUploadCpa.checked ? 'block' : 'none';
+    elements.autoUploadSub2api.checked = !!registrationConfig.auto_upload_sub2api;
+    elements.sub2apiServiceSelectGroup.style.display = elements.autoUploadSub2api.checked ? 'block' : 'none';
+    elements.autoUploadTm.checked = !!registrationConfig.auto_upload_tm;
+    elements.tmServiceSelectGroup.style.display = elements.autoUploadTm.checked ? 'block' : 'none';
+    if (elements.autoUploadNewApi) {
+        elements.autoUploadNewApi.checked = !!registrationConfig.auto_upload_new_api;
+    }
+    if (elements.newApiServiceSelectGroup && elements.autoUploadNewApi) {
+        elements.newApiServiceSelectGroup.style.display = elements.autoUploadNewApi.checked ? 'block' : 'none';
+    }
+
+    setSelectedServiceIds(elements.cpaServiceSelect, registrationConfig.cpa_service_ids || []);
+    setSelectedServiceIds(elements.sub2apiServiceSelect, registrationConfig.sub2api_service_ids || []);
+    setSelectedServiceIds(elements.tmServiceSelect, registrationConfig.tm_service_ids || []);
+    setSelectedServiceIds(elements.newApiServiceSelect, registrationConfig.new_api_service_ids || []);
+
+    if (emailServiceType === 'outlook_batch') {
+        isOutlookBatchMode = true;
+        elements.outlookBatchSection.style.display = 'block';
+        elements.regModeGroup.style.display = 'none';
+        elements.batchCountGroup.style.display = 'none';
+        elements.batchOptions.style.display = 'none';
+        if (Array.isArray(registrationConfig.service_ids) && registrationConfig.service_ids.length) {
+            const selectedSet = new Set(registrationConfig.service_ids.map(item => parseInt(item)));
+            document.querySelectorAll('.outlook-account-checkbox').forEach(cb => {
+                cb.checked = selectedSet.has(parseInt(cb.value));
+            });
+        }
+        elements.outlookSkipRegistered.checked = registrationConfig.skip_registered !== false;
+        elements.outlookIntervalMin.value = registrationConfig.interval_min || 5;
+        elements.outlookIntervalMax.value = registrationConfig.interval_max || 30;
+        elements.outlookConcurrencyCount.value = registrationConfig.concurrency || 3;
+        elements.outlookConcurrencyMode.value = registrationConfig.mode || 'pipeline';
+        handleConcurrencyModeChange(elements.outlookConcurrencyMode, elements.outlookConcurrencyHint, elements.outlookIntervalGroup);
+        return;
+    }
+
+    isOutlookBatchMode = false;
+    elements.outlookBatchSection.style.display = 'none';
+    elements.regModeGroup.style.display = 'block';
+    elements.regMode.value = registrationConfig.reg_mode === 'batch' ? 'batch' : 'single';
+    handleModeChange({ target: elements.regMode });
+    elements.batchCount.value = registrationConfig.batch_count || 1;
+    elements.intervalMin.value = registrationConfig.interval_min || 5;
+    elements.intervalMax.value = registrationConfig.interval_max || 30;
+    elements.concurrencyCount.value = registrationConfig.concurrency || 1;
+    elements.concurrencyMode.value = registrationConfig.mode || 'pipeline';
+    handleConcurrencyModeChange(elements.concurrencyMode, elements.concurrencyHint, elements.intervalGroup);
+}
+
+function setSelectedServiceIds(container, selectedIds) {
+    if (!container) return;
+    const selectedSet = new Set((selectedIds || []).map(item => parseInt(item)));
+    container.querySelectorAll('.msd-item input').forEach(cb => {
+        cb.checked = selectedSet.size === 0 ? true : selectedSet.has(parseInt(cb.value));
+    });
+    const dropdownId = `${container.id}-dd`;
+    updateMsdLabel(dropdownId);
+}
+
+function formatScheduleDateTime(value) {
+    if (!value) return '-';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    return parsed.toLocaleString('zh-CN', { hour12: false });
+}
+
+function getScheduleStatusClass(job) {
+    if (!job.enabled) return 'cancelled';
+    if (job.status === 'failed') return 'failed';
+    if (job.is_running || job.status === 'running') return 'running';
+    if (job.status === 'scheduled') return 'completed';
+    return 'pending';
+}
+
+async function loadScheduledJobs() {
+    if (!elements.scheduleJobsTable) return;
+    try {
+        const data = await api.get('/registration/schedules?page=1&page_size=100');
+        scheduledJobs = data.jobs || [];
+        if (editingScheduleJobUuid) {
+            const currentJob = scheduledJobs.find(item => item.job_uuid === editingScheduleJobUuid);
+            if (currentJob) {
+                setRegistrationConfigToForm(currentJob.registration_config || {});
+            }
+        }
+        renderScheduledJobs();
+    } catch (error) {
+        elements.scheduleJobsTable.innerHTML = `<tr><td colspan="6"><div class="empty-state" style="padding: var(--spacing-md);"><div class="empty-state-title">加载失败：${escapeHtml(error.message)}</div></div></td></tr>`;
+    }
+}
+
+function renderScheduledJobs() {
+    if (!elements.scheduleJobsTable) return;
+    if (!scheduledJobs.length) {
+        elements.scheduleJobsTable.innerHTML = `<tr><td colspan="6"><div class="empty-state" style="padding: var(--spacing-md);"><div class="empty-state-icon">🗓️</div><div class="empty-state-title">暂无计划任务</div></div></td></tr>`;
+        return;
+    }
+
+    elements.scheduleJobsTable.innerHTML = scheduledJobs.map(job => `
+        <tr>
+            <td>
+                <div style="font-weight: 600;">${escapeHtml(job.name)}</div>
+                <div class="schedule-muted">${job.enabled ? '已启用' : '已暂停'}</div>
+            </td>
+            <td>${escapeHtml(job.schedule_description || '-')}</td>
+            <td>${escapeHtml(formatScheduleDateTime(job.next_run_at))}</td>
+            <td>${escapeHtml(formatScheduleDateTime(job.last_run_at))}</td>
+            <td><span class="status-badge ${getScheduleStatusClass(job)}">${escapeHtml(job.status || 'idle')}</span></td>
+            <td>
+                <div class="schedule-table-actions">
+                    <button type="button" class="btn btn-ghost btn-sm" onclick="editScheduledJob('${job.job_uuid}')">编辑</button>
+                    <button type="button" class="btn btn-ghost btn-sm" onclick="toggleScheduledJob('${job.job_uuid}', ${job.enabled ? 'false' : 'true'})">${job.enabled ? '暂停' : '启用'}</button>
+                    <button type="button" class="btn btn-ghost btn-sm" onclick="runScheduledJobNow('${job.job_uuid}')">立即执行</button>
+                    <button type="button" class="btn btn-ghost btn-sm" onclick="deleteScheduledJob('${job.job_uuid}')">删除</button>
+                </div>
+            </td>
+        </tr>
+    `).join('');
+}
+
+async function editScheduledJob(jobUuid) {
+    try {
+        const job = await api.get(`/registration/schedules/${jobUuid}`);
+        editingScheduleJobUuid = jobUuid;
+        elements.scheduleName.value = job.name || '';
+        elements.scheduleEnabled.value = job.enabled ? 'true' : 'false';
+        elements.scheduleTriggerType.value = job.schedule_type || 'interval';
+        if (job.schedule_type === 'interval') {
+            elements.scheduleIntervalMinutes.value = job.schedule_config?.interval_minutes || 60;
+        } else {
+            elements.scheduleEveryNDays.value = job.schedule_config?.every_n_days || 1;
+            elements.scheduleTimeOfDay.value = job.schedule_config?.time_of_day || '09:00';
+            elements.scheduleStartDate.value = job.schedule_config?.start_date || new Date().toISOString().slice(0, 10);
+        }
+        setRegistrationConfigToForm(job.registration_config || {});
+        elements.saveScheduleBtn.textContent = '更新计划任务';
+        elements.cancelScheduleEditBtn.style.display = 'block';
+        updateScheduleTriggerFields();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (error) {
+        toast.error(error.message);
+    }
+}
+
+async function toggleScheduledJob(jobUuid, shouldEnable) {
+    try {
+        const endpoint = shouldEnable ? `/registration/schedules/${jobUuid}/enable` : `/registration/schedules/${jobUuid}/pause`;
+        await api.post(endpoint, {});
+        toast.success(shouldEnable ? '计划任务已启用' : '计划任务已暂停');
+        await loadScheduledJobs();
+    } catch (error) {
+        toast.error(error.message);
+    }
+}
+
+async function runScheduledJobNow(jobUuid) {
+    try {
+        const data = await api.post(`/registration/schedules/${jobUuid}/run`, {});
+        toast.success(data.message || '计划任务已触发执行');
+        await loadScheduledJobs();
+    } catch (error) {
+        toast.error(error.message);
+    }
+}
+
+async function deleteScheduledJob(jobUuid) {
+    try {
+        await api.delete(`/registration/schedules/${jobUuid}`);
+        toast.success('计划任务已删除');
+        if (editingScheduleJobUuid === jobUuid) {
+            resetScheduleForm();
+        }
+        await loadScheduledJobs();
+    } catch (error) {
+        toast.error(error.message);
+    }
+}
+
+window.editScheduledJob = editScheduledJob;
+window.toggleScheduledJob = toggleScheduledJob;
+window.runScheduledJobNow = runScheduledJobNow;
+window.deleteScheduledJob = deleteScheduledJob;
+
 // 开始注册
 async function handleStartRegistration(e) {
     e.preventDefault();
+
+    if (isAutoMode) {
+        await handleSaveAutoRegistration();
+        return;
+    }
 
     const selectedValue = elements.emailService.value;
     if (!selectedValue) {
@@ -877,9 +1014,6 @@ async function handleStartRegistration(e) {
         return;
     }
 
-    const useBatchRegistration = isNormalBatchMode();
-    const [emailServiceType, serviceId] = selectedValue.split(':');
-
     // 禁用开始按钮
     elements.startBtn.disabled = true;
     elements.cancelBtn.disabled = false;
@@ -887,125 +1021,148 @@ async function handleStartRegistration(e) {
     // 清空日志
     elements.consoleLog.innerHTML = '';
 
-    // 构建请求数据
-    const requestData = {
-        email_service_type: emailServiceType,
-        registration_mode: elements.registrationMode ? elements.registrationMode.value : 'protocol',
-        proxy: elements.regProxy ? elements.regProxy.value.trim() || null : null,
-        random_email_service: !!(elements.randomEmailService && elements.randomEmailService.checked && !elements.randomEmailService.disabled),
-        random_outlook_account: !!(elements.randomOutlookAccount && elements.randomOutlookAccount.checked),
-        random_domain: !!(elements.randomDomain && elements.randomDomain.checked),
-        selected_email_addresses: getSelectedDropdownValues(elements.emailAddressSelect),
-        selected_domains: getSelectedDropdownValues(elements.domainSelect),
-        auto_upload_cpa: elements.autoUploadCpa ? elements.autoUploadCpa.checked : false,
-        cpa_service_ids: elements.autoUploadCpa && elements.autoUploadCpa.checked ? getSelectedServiceIds(elements.cpaServiceSelect) : [],
-        auto_upload_sub2api: elements.autoUploadSub2api ? elements.autoUploadSub2api.checked : false,
-        sub2api_service_ids: elements.autoUploadSub2api && elements.autoUploadSub2api.checked ? getSelectedServiceIds(elements.sub2apiServiceSelect) : [],
-        auto_upload_tm: elements.autoUploadTm ? elements.autoUploadTm.checked : false,
-        tm_service_ids: elements.autoUploadTm && elements.autoUploadTm.checked ? getSelectedServiceIds(elements.tmServiceSelect) : [],
-    };
+    const requestData = buildCurrentRegistrationConfig();
 
-    // 如果选择了数据库中的服务，传递 service_id
-    if (serviceId && serviceId !== 'default') {
-        requestData.email_service_id = parseInt(serviceId);
-    }
-
-    if (useBatchRegistration) {
+    if (isBatchMode) {
         await handleBatchRegistration(requestData);
     } else {
         await handleSingleRegistration(requestData);
     }
 }
 
-function isTerminalTaskStatus(status) {
-    return ['completed', 'failed', 'cancelled'].includes(status);
+
+async function loadAutoRegistrationSettings() {
+    if (!elements.autoRegistrationEnabled) return;
+    try {
+        const data = await api.get('/settings');
+        const reg = data.registration || {};
+        elements.autoRegistrationEnabled.checked = reg.auto_enabled || false;
+        elements.autoRegistrationCheckInterval.value = reg.auto_check_interval || 60;
+        elements.autoRegistrationMinReady.value = reg.auto_min_ready_auth_files || 1;
+        elements.autoRegistrationEmailServiceType.value = reg.auto_email_service_type || 'tempmail';
+        elements.autoRegistrationProxy.value = reg.auto_proxy || '';
+        elements.autoRegistrationMode.value = reg.auto_mode || 'pipeline';
+        elements.autoRegistrationConcurrency.value = reg.auto_concurrency || 1;
+        elements.autoRegistrationIntervalMin.value = reg.auto_interval_min || 5;
+        elements.autoRegistrationIntervalMax.value = reg.auto_interval_max || 30;
+        handleConcurrencyModeChange(
+            elements.autoRegistrationMode,
+            elements.concurrencyHint,
+            elements.autoRegistrationIntervalGroup
+        );
+        elements.autoRegistrationEmailServiceId.dataset.selectedId = String(reg.auto_email_service_id || 0);
+        elements.autoRegistrationCpaServiceId.dataset.selectedId = String(reg.auto_cpa_service_id || 0);
+        populateAutoRegistrationEmailServiceOptions(reg.auto_email_service_id || 0);
+    } catch (error) {
+        console.error('加载自动注册设置失败:', error);
+    }
 }
 
-function isTerminalBatchStatus(status) {
-    return ['completed', 'failed', 'cancelled'].includes(status);
+async function loadAutoRegistrationCpaOptions() {
+    if (!elements.autoRegistrationCpaServiceId) return;
+    try {
+        const services = await api.get('/cpa-services?enabled=true');
+        const options = ['<option value="0">请选择 CPA 服务</option>'];
+        services.forEach(service => {
+            options.push(`<option value="${service.id}">${escapeHtml(service.name)} (#${service.id})</option>`);
+        });
+        elements.autoRegistrationCpaServiceId.innerHTML = options.join('');
+        elements.autoRegistrationCpaServiceId.value = elements.autoRegistrationCpaServiceId.dataset.selectedId || '0';
+    } catch (error) {
+        console.error('加载 CPA 服务失败:', error);
+    }
 }
 
-function getCurrentBatchKind() {
-    return currentBatch?.batch_kind || (isOutlookBatchMode ? 'outlook_batch' : 'batch');
+function populateAutoRegistrationEmailServiceOptions(selectedId = 0) {
+    if (!elements.autoRegistrationEmailServiceId || !elements.autoRegistrationEmailServiceType) return;
+    const selectedType = elements.autoRegistrationEmailServiceType.value || 'tempmail';
+    const options = ['<option value="0">自动选择</option>'];
+    const bucket = availableServices[selectedType];
+    if (bucket && Array.isArray(bucket.services)) {
+        bucket.services.forEach(service => {
+            options.push(`<option value="${service.id}">${escapeHtml(service.name)} (#${service.id})</option>`);
+        });
+    }
+    elements.autoRegistrationEmailServiceId.innerHTML = options.join('');
+    elements.autoRegistrationEmailServiceId.value = String(selectedId || elements.autoRegistrationEmailServiceId.dataset.selectedId || 0);
 }
 
-function getBatchStatusEndpoint(batchId, batchKind = getCurrentBatchKind()) {
-    return batchKind === 'outlook_batch'
-        ? `/registration/outlook-batch/${batchId}`
-        : `/registration/batch/${batchId}`;
-}
+async function handleSaveAutoRegistration() {
+    const autoCheckInterval = parseInt(elements.autoRegistrationCheckInterval.value, 10) || 60;
+    const autoMinReady = parseInt(elements.autoRegistrationMinReady.value, 10) || 1;
+    const autoEmailServiceId = parseInt(elements.autoRegistrationEmailServiceId.value, 10) || 0;
+    const autoConcurrency = parseInt(elements.autoRegistrationConcurrency.value, 10) || 1;
+    const autoIntervalMin = parseInt(elements.autoRegistrationIntervalMin.value, 10) || 0;
+    const autoIntervalMax = parseInt(elements.autoRegistrationIntervalMax.value, 10) || 0;
+    const autoCpaServiceId = parseInt(elements.autoRegistrationCpaServiceId.value, 10) || 0;
 
-function startCurrentBatchPolling(batchId, batchKind = getCurrentBatchKind()) {
-    if (batchKind === 'outlook_batch') {
-        startOutlookBatchPolling(batchId);
+    if (autoCheckInterval < 5 || autoCheckInterval > 3600) {
+        toast.error('自动注册检查间隔必须在 5-3600 秒之间');
+        return;
+    }
+    if (autoMinReady < 1 || autoMinReady > 10000) {
+        toast.error('自动注册保底数量必须在 1-10000 之间');
+        return;
+    }
+    if (autoIntervalMin < 0 || autoIntervalMax < autoIntervalMin) {
+        toast.error('自动注册启动间隔参数无效');
+        return;
+    }
+    if (autoConcurrency < 1 || autoConcurrency > 100) {
+        toast.error('自动注册并发数必须在 1-100 之间');
+        return;
+    }
+    if (elements.autoRegistrationEnabled.checked && autoCpaServiceId <= 0) {
+        toast.error('启用自动注册前请先选择一个 CPA 服务');
+        return;
+    }
+
+    const data = await api.get('/settings');
+    const reg = data.registration || {};
+    const payload = {
+        max_retries: reg.max_retries || 3,
+        timeout: reg.timeout || 120,
+        default_password_length: reg.default_password_length || 12,
+        entry_flow: reg.entry_flow || 'native',
+        sleep_min: reg.sleep_min || 5,
+        sleep_max: reg.sleep_max || 30,
+        auto_enabled: elements.autoRegistrationEnabled.checked,
+        auto_check_interval: autoCheckInterval,
+        auto_min_ready_auth_files: autoMinReady,
+        auto_email_service_type: elements.autoRegistrationEmailServiceType.value,
+        auto_email_service_id: autoEmailServiceId,
+        auto_proxy: elements.autoRegistrationProxy.value.trim(),
+        auto_interval_min: autoIntervalMin,
+        auto_interval_max: autoIntervalMax,
+        auto_concurrency: autoConcurrency,
+        auto_mode: elements.autoRegistrationMode.value,
+        auto_cpa_service_id: autoCpaServiceId,
+    };
+
+    await api.post('/settings/registration', payload);
+    toast.success('自动注册设置已保存');
+
+    if (elements.autoRegistrationEnabled.checked) {
+        sessionStorage.setItem('activeTask', JSON.stringify({ mode: 'auto' }));
+        autoMonitorLastLogIndex = 0;
+        displayedLogs.clear();
+        elements.consoleLog.innerHTML = '';
+        addLog('info', '[系统] 自动注册监控已启动');
+        startAutoRegistrationMonitor();
     } else {
-        startBatchPolling(batchId);
-    }
-}
-
-function syncTaskRuntime(data) {
-    updateTaskStatus(data.status, data);
-
-    if (data.email) {
-        elements.taskEmail.textContent = data.email;
-    }
-    if (data.email_service) {
-        elements.taskService.textContent = getServiceTypeText(data.email_service);
-    }
-}
-
-function finalizeSingleTask(data) {
-    taskFinalStatus = data.status;
-    taskCompleted = true;
-    stopLogPolling();
-    resetButtons();
-
-    if (toastShown) {
-        return;
-    }
-
-    toastShown = true;
-    if (data.status === 'completed') {
-        addLog('success', '[成功] 注册成功！');
-        toast.success('注册成功！');
-        loadRecentAccounts();
-    } else if (data.status === 'failed') {
-        addLog('error', '[错误] 注册失败');
-        toast.error('注册失败');
-    } else if (data.status === 'cancelled') {
-        addLog('warning', '[警告] 任务已取消');
-        toast.info('任务已取消');
-    }
-}
-
-function finalizeBatchTask(data) {
-    const batchKind = getCurrentBatchKind();
-    const batchLabel = batchKind === 'outlook_batch' ? 'Outlook 批量注册' : '批量注册';
-
-    batchFinalStatus = data.status || (data.cancelled ? 'cancelled' : 'completed');
-    batchCompleted = true;
-    stopBatchPolling();
-    resetButtons();
-
-    if (toastShown) {
-        return;
-    }
-
-    toastShown = true;
-    if (batchFinalStatus === 'completed') {
-        addLog('success', `[完成] ${batchLabel}完成！成功: ${data.success}, 失败: ${data.failed}${data.skipped !== undefined ? `, 跳过: ${data.skipped}` : ''}`);
-        if (data.success > 0) {
-            toast.success(`${batchLabel}完成，成功 ${data.success} 个`);
-            loadRecentAccounts();
-        } else {
-            toast.warning(`${batchLabel}完成，但没有成功注册任何账号`);
+        stopAutoRegistrationMonitor();
+        const saved = sessionStorage.getItem('activeTask');
+        if (saved) {
+            try {
+                const parsed = JSON.parse(saved);
+                if (parsed.mode === 'auto') {
+                    sessionStorage.removeItem('activeTask');
+                }
+            } catch {
+                sessionStorage.removeItem('activeTask');
+            }
         }
-    } else if (batchFinalStatus === 'failed') {
-        addLog('error', `[错误] ${batchLabel}执行失败`);
-        toast.error(`${batchLabel}执行失败`);
-    } else if (batchFinalStatus === 'cancelled') {
-        addLog('warning', `[警告] ${batchLabel}已取消`);
-        toast.info(`${batchLabel}已取消`);
+        addLog('info', '[系统] 自动注册已禁用');
     }
 }
 
@@ -1028,10 +1185,9 @@ async function handleSingleRegistration(requestData) {
         sessionStorage.setItem('activeTask', JSON.stringify({ task_uuid: data.task_uuid, mode: 'single' }));
         addLog('info', `[系统] 任务已创建: ${data.task_uuid}`);
         showTaskStatus(data);
-        syncTaskRuntime({ status: 'running', attempt: 0, max_attempts: 1 });
+        updateTaskStatus('running');
 
-        // WebSocket 实时推送 + 轮询兜底
-        startLogPolling(data.task_uuid);
+        // 优先使用 WebSocket
         connectWebSocket(data.task_uuid);
 
     } catch (error) {
@@ -1044,76 +1200,198 @@ async function handleSingleRegistration(requestData) {
 
 // ============== WebSocket 功能 ==============
 
+function getReconnectDelay(attempt) {
+    return Math.min(WS_RECONNECT_BASE_DELAY * (2 ** Math.max(0, attempt - 1)), WS_RECONNECT_MAX_DELAY);
+}
+
+function clearWebSocketReconnect() {
+    if (wsReconnectTimer) {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+    }
+    wsReconnectAttempts = 0;
+}
+
+function clearBatchWebSocketReconnect() {
+    if (batchWsReconnectTimer) {
+        clearTimeout(batchWsReconnectTimer);
+        batchWsReconnectTimer = null;
+    }
+    batchWsReconnectAttempts = 0;
+}
+
+function scheduleWebSocketReconnect(taskUuid) {
+    if (!taskUuid || wsReconnectTimer || wsManualClose || taskCompleted || taskFinalStatus !== null || activeTaskUuid !== taskUuid) {
+        return;
+    }
+
+    wsReconnectAttempts += 1;
+    const delay = getReconnectDelay(wsReconnectAttempts);
+    addLog('warning', `[系统] WebSocket 已断开，${delay / 1000} 秒后尝试重连任务监控...`);
+
+    wsReconnectTimer = setTimeout(() => {
+        wsReconnectTimer = null;
+        connectWebSocket(taskUuid);
+    }, delay);
+}
+
+function scheduleBatchWebSocketReconnect(batchId) {
+    if (!batchId || batchWsReconnectTimer || batchWsManualClose || batchCompleted || batchFinalStatus !== null || activeBatchId !== batchId) {
+        return;
+    }
+
+    batchWsReconnectAttempts += 1;
+    const delay = getReconnectDelay(batchWsReconnectAttempts);
+    addLog('warning', `[系统] 批量任务 WebSocket 已断开，${delay / 1000} 秒后尝试重连监控...`);
+
+    batchWsReconnectTimer = setTimeout(() => {
+        batchWsReconnectTimer = null;
+        connectBatchWebSocket(batchId);
+    }, delay);
+}
+
+function startCurrentBatchPolling(batchId) {
+    if (!batchId) return;
+
+    const pollingMode = currentBatch && currentBatch.batch_id === batchId
+        ? currentBatch.pollingMode
+        : (isOutlookBatchMode ? 'outlook_batch' : 'batch');
+
+    if (pollingMode === 'outlook_batch') {
+        startOutlookBatchPolling(batchId);
+        return;
+    }
+
+    startBatchPolling(batchId);
+}
+
 // 连接 WebSocket
 function connectWebSocket(taskUuid) {
+    activeTaskUuid = taskUuid;
+
+    if (webSocket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(webSocket.readyState)) {
+        return;
+    }
+
+    if (wsReconnectTimer) {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+    }
+    wsManualClose = false;
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/api/ws/task/${taskUuid}`;
 
     try {
-        webSocket = new WebSocket(wsUrl);
+        const socket = new WebSocket(wsUrl);
+        webSocket = socket;
 
-        webSocket.onopen = () => {
+        socket.onopen = () => {
+            if (webSocket !== socket) return;
             console.log('WebSocket 连接成功');
             useWebSocket = true;
+            clearWebSocketReconnect();
+            // 停止轮询（如果有）
+            stopLogPolling();
             // 开始心跳
             startWebSocketHeartbeat();
         };
 
-        webSocket.onmessage = (event) => {
+        socket.onmessage = (event) => {
+            if (webSocket !== socket) return;
             const data = JSON.parse(event.data);
 
             if (data.type === 'log') {
                 const logType = getLogType(data.message);
                 addLog(logType, data.message);
             } else if (data.type === 'status') {
-                syncTaskRuntime(data);
+                updateTaskStatus(data.status);
+                if (data.email) {
+                    elements.taskEmail.textContent = data.email;
+                }
+                if (data.email_service) {
+                    elements.taskService.textContent = getServiceTypeText(data.email_service);
+                }
 
-                if (isTerminalTaskStatus(data.status)) {
+                // 检查是否完成
+                if (['completed', 'failed', 'cancelled', 'cancelling'].includes(data.status)) {
+                    // 保存最终状态，用于 onclose 判断
+                    taskFinalStatus = data.status;
+                    taskCompleted = true;
+
+                    // 断开 WebSocket（异步操作）
                     disconnectWebSocket();
-                    finalizeSingleTask(data);
+
+                    // 任务完成后再重置按钮
+                    resetButtons();
+
+                    // 只显示一次 toast
+                    if (!toastShown) {
+                        toastShown = true;
+                        if (data.status === 'completed') {
+                            addLog('success', '[成功] 注册成功！');
+                            toast.success('注册成功！');
+                            // 刷新账号列表
+                            loadRecentAccounts();
+                        } else if (data.status === 'failed') {
+                            addLog('error', '[错误] 注册失败');
+                            toast.error('注册失败');
+                        } else if (data.status === 'cancelled' || data.status === 'cancelling') {
+                            addLog('warning', '[警告] 任务已取消');
+                        }
+                    }
                 }
             } else if (data.type === 'pong') {
                 // 心跳响应，忽略
             }
         };
 
-        webSocket.onclose = (event) => {
+        socket.onclose = (event) => {
+            const isCurrentSocket = webSocket === socket;
+            if (isCurrentSocket) {
+                webSocket = null;
+                stopWebSocketHeartbeat();
+            }
+
             console.log('WebSocket 连接关闭:', event.code);
-            stopWebSocketHeartbeat();
 
-            // 只有在任务未完成且最终状态不是完成状态时才切换到轮询
-            // 使用 taskFinalStatus 而不是 currentTask.status，因为 currentTask 可能已被重置
-            const shouldPoll = !taskCompleted &&
-                               taskFinalStatus === null;  // 如果 taskFinalStatus 有值，说明任务已完成
+            const shouldReconnect = isCurrentSocket &&
+                !wsManualClose &&
+                !taskCompleted &&
+                taskFinalStatus === null &&
+                activeTaskUuid === taskUuid;
 
-            if (shouldPoll && currentTask) {
-                console.log('切换到轮询模式');
+            if (shouldReconnect) {
+                console.log('WebSocket 断开，准备自动重连');
                 useWebSocket = false;
-                startLogPolling(currentTask.task_uuid);
+                startLogPolling(taskUuid);
+                scheduleWebSocketReconnect(taskUuid);
             }
         };
 
-        webSocket.onerror = (error) => {
+        socket.onerror = (error) => {
+            if (webSocket !== socket) return;
             console.error('WebSocket 错误:', error);
-            // 切换到轮询
             useWebSocket = false;
-            stopWebSocketHeartbeat();
-            startLogPolling(taskUuid);
         };
 
     } catch (error) {
         console.error('WebSocket 连接失败:', error);
         useWebSocket = false;
         startLogPolling(taskUuid);
+        scheduleWebSocketReconnect(taskUuid);
     }
 }
 
 // 断开 WebSocket
 function disconnectWebSocket() {
+    wsManualClose = true;
+    clearWebSocketReconnect();
     stopWebSocketHeartbeat();
     if (webSocket) {
-        webSocket.close();
+        const socket = webSocket;
         webSocket = null;
+        socket.close();
     }
 }
 
@@ -1167,7 +1445,7 @@ async function handleBatchRegistration(requestData) {
     try {
         const data = await api.post('/registration/batch', requestData);
 
-        currentBatch = { ...data, batch_kind: 'batch' };
+        currentBatch = { ...data, pollingMode: 'batch' };
         activeBatchId = data.batch_id;  // 保存用于重连
         // 持久化到 sessionStorage，跨页面导航后可恢复
         sessionStorage.setItem('activeTask', JSON.stringify({ batch_id: data.batch_id, mode: 'batch', total: data.count }));
@@ -1175,8 +1453,7 @@ async function handleBatchRegistration(requestData) {
         addLog('info', `[系统] 共 ${data.count} 个任务已加入队列`);
         showBatchStatus(data);
 
-        // WebSocket 实时推送 + 轮询兜底
-        startBatchPolling(data.batch_id);
+        // 优先使用 WebSocket
         connectBatchWebSocket(data.batch_id);
 
     } catch (error) {
@@ -1194,8 +1471,7 @@ async function handleCancelTask() {
 
     try {
         // 批量任务取消（包括普通批量模式和 Outlook 批量模式）
-        if (currentBatch) {
-            const batchKind = getCurrentBatchKind();
+        if (currentBatch && (isBatchMode || isOutlookBatchMode || isAutoMode)) {
             // 优先通过 WebSocket 取消
             if (batchWebSocket && batchWebSocket.readyState === WebSocket.OPEN) {
                 batchWebSocket.send(JSON.stringify({ type: 'cancel' }));
@@ -1203,14 +1479,17 @@ async function handleCancelTask() {
                 toast.info('任务取消请求已提交');
             } else {
                 // 降级到 REST API
-                const endpoint = batchKind === 'outlook_batch'
+                const endpoint = isOutlookBatchMode
                     ? `/registration/outlook-batch/${currentBatch.batch_id}/cancel`
                     : `/registration/batch/${currentBatch.batch_id}/cancel`;
 
                 await api.post(endpoint);
                 addLog('warning', '[警告] 批量任务取消请求已提交');
                 toast.info('任务取消请求已提交');
-                startCurrentBatchPolling(currentBatch.batch_id, batchKind);
+                if (!isAutoMode) {
+                    stopBatchPolling();
+                    resetButtons();
+                }
             }
         }
         // 单次任务取消
@@ -1223,10 +1502,10 @@ async function handleCancelTask() {
             } else {
                 // 降级到 REST API
                 await api.post(`/registration/tasks/${currentTask.task_uuid}/cancel`);
-                addLog('warning', '[警告] 任务取消请求已提交');
-                toast.info('任务取消请求已提交');
-                updateTaskStatus('cancelling');
-                startLogPolling(currentTask.task_uuid);
+                addLog('warning', '[警告] 任务已取消');
+                toast.info('任务已取消');
+                stopLogPolling();
+                resetButtons();
             }
         }
         // 没有活动任务
@@ -1245,14 +1524,26 @@ async function handleCancelTask() {
 
 // 开始轮询日志
 function startLogPolling(taskUuid) {
-    stopLogPolling();
+    if (logPollingInterval) {
+        return;
+    }
+
     let lastLogIndex = 0;
 
     logPollingInterval = setInterval(async () => {
         try {
             const data = await api.get(`/registration/tasks/${taskUuid}/logs`);
 
-            syncTaskRuntime(data);
+            // 更新任务状态
+            updateTaskStatus(data.status);
+
+            // 更新邮箱信息
+            if (data.email) {
+                elements.taskEmail.textContent = data.email;
+            }
+            if (data.email_service) {
+                elements.taskService.textContent = getServiceTypeText(data.email_service);
+            }
 
             // 添加新日志
             const logs = data.logs || [];
@@ -1263,8 +1554,26 @@ function startLogPolling(taskUuid) {
             }
             lastLogIndex = logs.length;
 
-            if (isTerminalTaskStatus(data.status)) {
-                finalizeSingleTask(data);
+            // 检查任务是否完成
+            if (['completed', 'failed', 'cancelled'].includes(data.status)) {
+                stopLogPolling();
+                resetButtons();
+
+                // 只显示一次 toast
+                if (!toastShown) {
+                    toastShown = true;
+                    if (data.status === 'completed') {
+                        addLog('success', '[成功] 注册成功！');
+                        toast.success('注册成功！');
+                        // 刷新账号列表
+                        loadRecentAccounts();
+                    } else if (data.status === 'failed') {
+                        addLog('error', '[错误] 注册失败');
+                        toast.error('注册失败');
+                    } else if (data.status === 'cancelled') {
+                        addLog('warning', '[警告] 任务已取消');
+                    }
+                }
             }
         } catch (error) {
             console.error('轮询日志失败:', error);
@@ -1282,14 +1591,32 @@ function stopLogPolling() {
 
 // 开始轮询批量状态
 function startBatchPolling(batchId) {
-    stopBatchPolling();
+    if (batchPollingInterval) {
+        return;
+    }
+
     batchPollingInterval = setInterval(async () => {
         try {
-            const data = await api.get(getBatchStatusEndpoint(batchId, 'batch'));
+            const data = await api.get(`/registration/batch/${batchId}`);
             updateBatchProgress(data);
 
-            if (data.finished || isTerminalBatchStatus(data.status)) {
-                finalizeBatchTask(data);
+            // 检查是否完成
+            if (data.finished) {
+                stopBatchPolling();
+                resetButtons();
+
+                // 只显示一次 toast
+                if (!toastShown) {
+                    toastShown = true;
+                    addLog('info', `[完成] 批量任务完成！成功: ${data.success}, 失败: ${data.failed}`);
+                    if (data.success > 0) {
+                        toast.success(`批量注册完成，成功 ${data.success} 个`);
+                        // 刷新账号列表
+                        loadRecentAccounts();
+                    } else {
+                        toast.warning('批量注册完成，但没有成功注册任何账号');
+                    }
+                }
             }
         } catch (error) {
             console.error('轮询批量状态失败:', error);
@@ -1313,37 +1640,30 @@ function showTaskStatus(task) {
     elements.taskId.textContent = task.task_uuid.substring(0, 8) + '...';
     elements.taskEmail.textContent = '-';
     elements.taskService.textContent = '-';
+    if (elements.taskLastChecked) {
+        elements.taskLastChecked.textContent = '-';
+    }
+    if (elements.taskInventory) {
+        elements.taskInventory.textContent = '-';
+    }
 }
 
 // 更新任务状态
-function updateTaskStatus(status, meta = {}) {
+function updateTaskStatus(status) {
     const statusInfo = {
         pending: { text: '等待中', class: 'pending' },
         running: { text: '运行中', class: 'running' },
-        cancelling: { text: '取消中', class: 'running' },
         completed: { text: '已完成', class: 'completed' },
         failed: { text: '失败', class: 'failed' },
-        cancelled: { text: '已取消', class: 'disabled' }
+        cancelled: { text: '已取消', class: 'disabled' },
+        checking: { text: '检查中', class: 'running' },
+        idle: { text: '空闲', class: 'completed' },
+        disabled: { text: '已禁用', class: 'disabled' },
+        error: { text: '异常', class: 'failed' },
+        cancelling: { text: '取消中', class: 'running' },
     };
 
-    let info = statusInfo[status] || { text: status, class: '' };
-    if (status === 'running' && meta.retrying) {
-        const attemptText = meta.attempt && meta.max_attempts
-            ? ` (${meta.attempt}/${meta.max_attempts})`
-            : '';
-        const countdownText = meta.next_retry_in_seconds
-            ? `，${meta.next_retry_in_seconds}s 后重试`
-            : '';
-        info = {
-            text: `自动重试中${attemptText}${countdownText}`,
-            class: 'running',
-        };
-    } else if (status === 'running' && meta.attempt && meta.max_attempts) {
-        info = {
-            text: `运行中 (${meta.attempt}/${meta.max_attempts})`,
-            class: 'running',
-        };
-    }
+    const info = statusInfo[status] || { text: status, class: '' };
     elements.taskStatusBadge.textContent = info.text;
     elements.taskStatusBadge.className = `status-badge ${info.class}`;
     elements.taskStatus.textContent = info.text;
@@ -1352,8 +1672,8 @@ function updateTaskStatus(status, meta = {}) {
 // 显示批量状态
 function showBatchStatus(batch) {
     elements.batchProgressSection.style.display = 'block';
-    elements.taskStatusRow.style.display = 'none';
-    elements.taskStatusBadge.style.display = 'none';
+    elements.taskStatusRow.style.display = isAutoMode ? 'grid' : 'none';
+    elements.taskStatusBadge.style.display = isAutoMode ? 'inline-flex' : 'none';
     elements.batchProgressText.textContent = `0/${batch.count}`;
     elements.batchProgressPercent.textContent = '0%';
     elements.progressBar.style.width = '0%';
@@ -1364,6 +1684,113 @@ function showBatchStatus(batch) {
     // 重置计数器
     elements.batchSuccess.dataset.last = '0';
     elements.batchFailed.dataset.last = '0';
+}
+
+function formatAutoMonitorTimestamp(value) {
+    if (!value) return '-';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString('zh-CN', {
+        hour12: false,
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+    });
+}
+
+function updateAutoMonitorHeader(status, lastCheckedAt) {
+    if (!elements.autoMonitorStatusBadge || !elements.autoMonitorLastChecked) return;
+
+    if (!isAutoMode) {
+        elements.autoMonitorStatusBadge.style.display = 'none';
+        elements.autoMonitorLastChecked.style.display = 'none';
+        return;
+    }
+
+    const statusInfo = {
+        pending: { text: '自动等待', class: 'pending' },
+        checking: { text: '自动检查中', class: 'running' },
+        running: { text: '自动补货中', class: 'running' },
+        idle: { text: '自动空闲', class: 'completed' },
+        disabled: { text: '自动已禁用', class: 'disabled' },
+        error: { text: '自动异常', class: 'failed' },
+        cancelling: { text: '自动取消中', class: 'running' },
+    };
+
+    const info = statusInfo[status] || { text: `自动${status || '未知'}`, class: 'pending' };
+    elements.autoMonitorStatusBadge.style.display = 'inline-flex';
+    elements.autoMonitorStatusBadge.textContent = info.text;
+    elements.autoMonitorStatusBadge.className = `status-badge ${info.class}`;
+    elements.autoMonitorLastChecked.style.display = 'inline';
+    elements.autoMonitorLastChecked.textContent = `最近检查: ${formatAutoMonitorTimestamp(lastCheckedAt)}`;
+}
+
+async function pollAutoRegistrationStatus() {
+    try {
+        const data = await api.get('/registration/auto-monitor');
+
+        elements.taskStatusRow.style.display = 'grid';
+        elements.taskId.textContent = data.current_batch_id || 'auto-registration';
+        elements.taskStatus.textContent = data.message || data.status || '-';
+        if (elements.taskLastChecked) {
+            elements.taskLastChecked.textContent = formatAutoMonitorTimestamp(data.last_checked_at);
+        }
+        if (elements.taskInventory) {
+            const readyCount = data.current_ready_count ?? '-';
+            const targetCount = data.target_ready_count ?? '-';
+            elements.taskInventory.textContent = `${readyCount} / ${targetCount}`;
+        }
+        const effectiveStatus = data.batch && data.batch.cancelled && !data.batch.finished
+            ? 'cancelling'
+            : (data.status || 'pending');
+        updateAutoMonitorHeader(effectiveStatus, data.last_checked_at);
+        updateTaskStatus(effectiveStatus);
+
+        const logs = data.logs || [];
+        for (let i = autoMonitorLastLogIndex; i < logs.length; i++) {
+            addLog(getLogType(logs[i]), logs[i]);
+        }
+        autoMonitorLastLogIndex = logs.length;
+
+        if (data.batch) {
+            currentBatch = data.batch;
+            activeBatchId = data.batch.batch_id;
+            batchCompleted = !!data.batch.finished;
+            elements.cancelBtn.disabled = !!data.batch.finished;
+            showBatchStatus({ count: data.batch.total });
+            updateBatchProgress(data.batch);
+            if ((!batchWebSocket || batchWebSocket.readyState === WebSocket.CLOSED) && !data.batch.finished) {
+                connectBatchWebSocket(data.batch.batch_id);
+            }
+        } else {
+            currentBatch = null;
+            activeBatchId = null;
+            elements.cancelBtn.disabled = true;
+            elements.batchProgressSection.style.display = 'none';
+        }
+    } catch (error) {
+        console.error('加载自动注册监控失败:', error);
+        updateAutoMonitorHeader('error', null);
+        elements.taskStatus.textContent = '自动注册监控获取失败';
+        addLog('warning', '[警告] 自动注册监控获取失败');
+    }
+}
+
+function startAutoRegistrationMonitor() {
+    stopAutoRegistrationMonitor();
+    pollAutoRegistrationStatus();
+    autoMonitorPollingInterval = setInterval(() => {
+        pollAutoRegistrationStatus();
+    }, 2000);
+}
+
+function stopAutoRegistrationMonitor() {
+    if (autoMonitorPollingInterval) {
+        clearInterval(autoMonitorPollingInterval);
+        autoMonitorPollingInterval = null;
+    }
 }
 
 // 更新批量进度
@@ -1456,6 +1883,83 @@ function startAccountsPolling() {
     }, 30000);
 }
 
+function renderTodayStats(total, success, failed, rate) {
+    if (elements.todayStatsTotal) {
+        elements.todayStatsTotal.textContent = String(Math.max(0, total));
+    }
+    if (elements.todayStatsSuccess) {
+        elements.todayStatsSuccess.textContent = String(Math.max(0, success));
+    }
+    if (elements.todayStatsFailed) {
+        elements.todayStatsFailed.textContent = String(Math.max(0, failed));
+    }
+    if (elements.todayStatsRate) {
+        const safeRate = Math.max(0, rate);
+        const rateCard = elements.todayStatsRate.closest('.today-stat-rate');
+        elements.todayStatsRate.textContent = `${safeRate.toFixed(1)}%`;
+        elements.todayStatsRate.classList.remove('rate-high', 'rate-mid', 'rate-low');
+        if (rateCard) {
+            rateCard.classList.remove('rate-high', 'rate-mid', 'rate-low');
+        }
+        if (safeRate >= 70) {
+            elements.todayStatsRate.classList.add('rate-high');
+            if (rateCard) rateCard.classList.add('rate-high');
+        } else if (safeRate < 40) {
+            elements.todayStatsRate.classList.add('rate-low');
+            if (rateCard) rateCard.classList.add('rate-low');
+        } else {
+            elements.todayStatsRate.classList.add('rate-mid');
+            if (rateCard) rateCard.classList.add('rate-mid');
+        }
+    }
+}
+
+async function loadTodayStats(silent = true) {
+    try {
+        const data = await api.get('/registration/stats');
+        const byStatus = data?.by_status || {};
+        const total = Number(data?.today_total ?? data?.today_count ?? 0);
+        const success = Number(data?.today_success ?? byStatus.completed ?? 0);
+        const failed = Number(data?.today_failed ?? byStatus.failed ?? 0);
+        const fallbackRate = total > 0 ? (success / total) * 100 : 0;
+        const rate = Number(data?.today_success_rate ?? fallbackRate);
+        renderTodayStats(total, success, failed, Number.isFinite(rate) ? rate : 0);
+    } catch (error) {
+        console.error('加载今日统计失败:', error);
+        if (!silent) {
+            toast.error('加载今日统计失败');
+        }
+    }
+}
+
+function updateTodayStatsResetText() {
+    if (!elements.todayStatsReset) return;
+    const now = new Date();
+    const next = new Date();
+    next.setHours(24, 0, 0, 0);
+    const remain = Math.max(0, next.getTime() - now.getTime());
+    const hours = Math.floor(remain / 3600000);
+    const minutes = Math.floor((remain % 3600000) / 60000);
+    elements.todayStatsReset.textContent = `重置剩余 ${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+function startTodayStatsResetTicker() {
+    updateTodayStatsResetText();
+    if (todayStatsResetInterval) {
+        clearInterval(todayStatsResetInterval);
+    }
+    todayStatsResetInterval = setInterval(updateTodayStatsResetText, 60000);
+}
+
+function startTodayStatsPolling() {
+    if (todayStatsPollingInterval) {
+        clearInterval(todayStatsPollingInterval);
+    }
+    todayStatsPollingInterval = setInterval(() => {
+        loadTodayStats(true);
+    }, 60000);
+}
+
 // 添加日志
 function addLog(type, message) {
     // 日志去重：使用消息内容的 hash 作为键
@@ -1515,11 +2019,17 @@ function getLogType(log) {
 // 重置按钮状态
 function resetButtons() {
     elements.startBtn.disabled = false;
-    elements.cancelBtn.disabled = true;
+    elements.cancelBtn.disabled = isAutoMode;
     stopLogPolling();
     stopBatchPolling();
+    if (!isAutoMode) {
+        stopAutoRegistrationMonitor();
+    }
+    clearWebSocketReconnect();
+    clearBatchWebSocketReconnect();
     currentTask = null;
     currentBatch = null;
+    isBatchMode = false;
     // 重置完成标志
     taskCompleted = false;
     batchCompleted = false;
@@ -1530,12 +2040,13 @@ function resetButtons() {
     activeTaskUuid = null;
     activeBatchId = null;
     // 清除 sessionStorage 持久化状态
-    sessionStorage.removeItem('activeTask');
+    if (!isAutoMode) {
+        sessionStorage.removeItem('activeTask');
+    }
     // 断开 WebSocket
     disconnectWebSocket();
     disconnectBatchWebSocket();
     // 注意：不重置 isOutlookBatchMode，因为用户可能想继续使用 Outlook 批量模式
-    syncRegistrationSectionsForServiceMode();
 }
 
 // HTML 转义
@@ -1651,7 +2162,7 @@ async function handleOutlookBatchRegistration() {
     const requestData = {
         service_ids: selectedIds,
         skip_registered: skipRegistered,
-        proxy: elements.regProxy ? elements.regProxy.value.trim() || null : null,
+        registration_type: elements.registrationType ? elements.registrationType.value : 'child',
         interval_min: intervalMin,
         interval_max: intervalMax,
         concurrency: Math.min(50, Math.max(1, concurrency)),
@@ -1662,6 +2173,8 @@ async function handleOutlookBatchRegistration() {
         sub2api_service_ids: elements.autoUploadSub2api && elements.autoUploadSub2api.checked ? getSelectedServiceIds(elements.sub2apiServiceSelect) : [],
         auto_upload_tm: elements.autoUploadTm ? elements.autoUploadTm.checked : false,
         tm_service_ids: elements.autoUploadTm && elements.autoUploadTm.checked ? getSelectedServiceIds(elements.tmServiceSelect) : [],
+        auto_upload_new_api: elements.autoUploadNewApi ? elements.autoUploadNewApi.checked : false,
+        new_api_service_ids: elements.autoUploadNewApi && elements.autoUploadNewApi.checked ? getSelectedServiceIds(elements.newApiServiceSelect) : [],
     };
 
     addLog('info', `[系统] 正在启动 Outlook 批量注册 (${selectedIds.length} 个账户)...`);
@@ -1676,7 +2189,7 @@ async function handleOutlookBatchRegistration() {
             return;
         }
 
-        currentBatch = { batch_id: data.batch_id, ...data, batch_kind: 'outlook_batch' };
+        currentBatch = { batch_id: data.batch_id, ...data, pollingMode: 'outlook_batch' };
         activeBatchId = data.batch_id;  // 保存用于重连
         // 持久化到 sessionStorage，跨页面导航后可恢复
         sessionStorage.setItem('activeTask', JSON.stringify({ batch_id: data.batch_id, mode: isOutlookBatchMode ? 'outlook_batch' : 'batch', total: data.to_register }));
@@ -1686,8 +2199,7 @@ async function handleOutlookBatchRegistration() {
         // 初始化批量状态显示
         showBatchStatus({ count: data.to_register });
 
-        // WebSocket 实时推送 + 轮询兜底
-        startOutlookBatchPolling(data.batch_id);
+        // 优先使用 WebSocket
         connectBatchWebSocket(data.batch_id);
 
     } catch (error) {
@@ -1701,19 +2213,37 @@ async function handleOutlookBatchRegistration() {
 
 // 连接批量任务 WebSocket
 function connectBatchWebSocket(batchId) {
+    activeBatchId = batchId;
+
+    if (batchWebSocket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(batchWebSocket.readyState)) {
+        return;
+    }
+
+    if (batchWsReconnectTimer) {
+        clearTimeout(batchWsReconnectTimer);
+        batchWsReconnectTimer = null;
+    }
+    batchWsManualClose = false;
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/api/ws/batch/${batchId}`;
 
     try {
-        batchWebSocket = new WebSocket(wsUrl);
+        const socket = new WebSocket(wsUrl);
+        batchWebSocket = socket;
 
-        batchWebSocket.onopen = () => {
+        socket.onopen = () => {
+            if (batchWebSocket !== socket) return;
             console.log('批量任务 WebSocket 连接成功');
+            clearBatchWebSocketReconnect();
+            // 停止轮询（如果有）
+            stopBatchPolling();
             // 开始心跳
             startBatchWebSocketHeartbeat();
         };
 
-        batchWebSocket.onmessage = (event) => {
+        socket.onmessage = (event) => {
+            if (batchWebSocket !== socket) return;
             const data = JSON.parse(event.data);
 
             if (data.type === 'log') {
@@ -1730,49 +2260,85 @@ function connectBatchWebSocket(batchId) {
                     });
                 }
 
-                if (isTerminalBatchStatus(data.status)) {
+                // 检查是否完成
+                if (['completed', 'failed', 'cancelled', 'cancelling'].includes(data.status)) {
+                    // 保存最终状态，用于 onclose 判断
+                    batchFinalStatus = data.status;
+                    batchCompleted = true;
+
+                    // 断开 WebSocket（异步操作）
                     disconnectBatchWebSocket();
-                    finalizeBatchTask(data);
+
+                    // 任务完成后再重置按钮
+                    resetButtons();
+
+                    // 只显示一次 toast
+                    if (!toastShown) {
+                        toastShown = true;
+                        if (data.status === 'completed') {
+                            addLog('success', `[完成] Outlook 批量任务完成！成功: ${data.success}, 失败: ${data.failed}, 跳过: ${data.skipped || 0}`);
+                            if (data.success > 0) {
+                                toast.success(`Outlook 批量注册完成，成功 ${data.success} 个`);
+                                loadRecentAccounts();
+                            } else {
+                                toast.warning('Outlook 批量注册完成，但没有成功注册任何账号');
+                            }
+                        } else if (data.status === 'failed') {
+                            addLog('error', '[错误] 批量任务执行失败');
+                            toast.error('批量任务执行失败');
+                        } else if (data.status === 'cancelled' || data.status === 'cancelling') {
+                            addLog('warning', '[警告] 批量任务已取消');
+                        }
+                    }
                 }
             } else if (data.type === 'pong') {
                 // 心跳响应，忽略
             }
         };
 
-        batchWebSocket.onclose = (event) => {
+        socket.onclose = (event) => {
+            const isCurrentSocket = batchWebSocket === socket;
+            if (isCurrentSocket) {
+                batchWebSocket = null;
+                stopBatchWebSocketHeartbeat();
+            }
+
             console.log('批量任务 WebSocket 连接关闭:', event.code);
-            stopBatchWebSocketHeartbeat();
 
-            // 只有在任务未完成且最终状态不是完成状态时才切换到轮询
-            // 使用 batchFinalStatus 而不是 currentBatch.status，因为 currentBatch 可能已被重置
-            const shouldPoll = !batchCompleted &&
-                               batchFinalStatus === null;  // 如果 batchFinalStatus 有值，说明任务已完成
+            const shouldReconnect = isCurrentSocket &&
+                !batchWsManualClose &&
+                !batchCompleted &&
+                batchFinalStatus === null &&
+                activeBatchId === batchId;
 
-            if (shouldPoll && currentBatch) {
-                console.log('切换到轮询模式');
-                startCurrentBatchPolling(currentBatch.batch_id, getCurrentBatchKind());
+            if (shouldReconnect) {
+                console.log('批量任务 WebSocket 断开，准备自动重连');
+                startCurrentBatchPolling(batchId);
+                scheduleBatchWebSocketReconnect(batchId);
             }
         };
 
-        batchWebSocket.onerror = (error) => {
+        socket.onerror = (error) => {
+            if (batchWebSocket !== socket) return;
             console.error('批量任务 WebSocket 错误:', error);
-            stopBatchWebSocketHeartbeat();
-            // 切换到轮询
-            startCurrentBatchPolling(batchId, getCurrentBatchKind());
         };
 
     } catch (error) {
         console.error('批量任务 WebSocket 连接失败:', error);
-        startCurrentBatchPolling(batchId, getCurrentBatchKind());
+        startCurrentBatchPolling(batchId);
+        scheduleBatchWebSocketReconnect(batchId);
     }
 }
 
 // 断开批量任务 WebSocket
 function disconnectBatchWebSocket() {
+    batchWsManualClose = true;
+    clearBatchWebSocketReconnect();
     stopBatchWebSocketHeartbeat();
     if (batchWebSocket) {
-        batchWebSocket.close();
+        const socket = batchWebSocket;
         batchWebSocket = null;
+        socket.close();
     }
 }
 
@@ -1803,11 +2369,13 @@ function cancelBatchViaWebSocket() {
 
 // 开始轮询 Outlook 批量状态（降级方案）
 function startOutlookBatchPolling(batchId) {
-    stopBatchPolling();
-    let lastLogIndex = 0;
+    if (batchPollingInterval) {
+        return;
+    }
+
     batchPollingInterval = setInterval(async () => {
         try {
-            const data = await api.get(getBatchStatusEndpoint(batchId, 'outlook_batch'));
+            const data = await api.get(`/registration/outlook-batch/${batchId}`);
 
             // 更新进度
             updateBatchProgress({
@@ -1819,21 +2387,38 @@ function startOutlookBatchPolling(batchId) {
 
             // 输出日志
             if (data.logs && data.logs.length > 0) {
+                const lastLogIndex = batchPollingInterval.lastLogIndex || 0;
                 for (let i = lastLogIndex; i < data.logs.length; i++) {
                     const log = data.logs[i];
                     const logType = getLogType(log);
                     addLog(logType, log);
                 }
-                lastLogIndex = data.logs.length;
+                batchPollingInterval.lastLogIndex = data.logs.length;
             }
 
-            if (data.finished || isTerminalBatchStatus(data.status)) {
-                finalizeBatchTask(data);
+            // 检查是否完成
+            if (data.finished) {
+                stopBatchPolling();
+                resetButtons();
+
+                // 只显示一次 toast
+                if (!toastShown) {
+                    toastShown = true;
+                    addLog('info', `[完成] Outlook 批量任务完成！成功: ${data.success}, 失败: ${data.failed}, 跳过: ${data.skipped || 0}`);
+                    if (data.success > 0) {
+                        toast.success(`Outlook 批量注册完成，成功 ${data.success} 个`);
+                        loadRecentAccounts();
+                    } else {
+                        toast.warning('Outlook 批量注册完成，但没有成功注册任何账号');
+                    }
+                }
             }
         } catch (error) {
             console.error('轮询 Outlook 批量状态失败:', error);
         }
     }, 2000);
+
+    batchPollingInterval.lastLogIndex = 0;
 }
 
 // ============== 页面可见性重连机制 ==============
@@ -1858,6 +2443,11 @@ function initVisibilityReconnect() {
             console.log('[重连] 页面重新可见，重连批量任务 WebSocket:', activeBatchId);
             addLog('info', '[系统] 页面重新激活，正在重连批量任务监控...');
             connectBatchWebSocket(activeBatchId);
+        }
+
+        if (isAutoMode && !autoMonitorPollingInterval) {
+            addLog('info', '[系统] 页面重新激活，正在恢复自动注册监控...');
+            startAutoRegistrationMonitor();
         }
     });
 }
@@ -1886,9 +2476,6 @@ async function restoreActiveTask() {
                 return;
             }
             // 任务仍在运行，恢复状态
-            isOutlookBatchMode = false;
-            setNormalRegistrationMode('single');
-            syncRegistrationSectionsForServiceMode();
             currentTask = data;
             activeTaskUuid = task_uuid;
             taskCompleted = false;
@@ -1898,9 +2485,8 @@ async function restoreActiveTask() {
             elements.startBtn.disabled = true;
             elements.cancelBtn.disabled = false;
             showTaskStatus(data);
-            syncTaskRuntime(data);
+            updateTaskStatus(data.status);
             addLog('info', `[系统] 检测到进行中的任务，正在重连监控... (${task_uuid.substring(0, 8)})`);
-            startLogPolling(task_uuid);
             connectWebSocket(task_uuid);
         } catch {
             sessionStorage.removeItem('activeTask');
@@ -1917,17 +2503,9 @@ async function restoreActiveTask() {
                 return;
             }
             // 批量任务仍在运行，恢复状态
-            isOutlookBatchMode = (mode === 'outlook_batch');
-            if (!isOutlookBatchMode) {
-                setNormalRegistrationMode('batch');
-            }
-            syncRegistrationSectionsForServiceMode();
-            currentBatch = {
-                batch_id,
-                ...data,
-                batch_kind: mode === 'outlook_batch' ? 'outlook_batch' : 'batch',
-            };
+            currentBatch = { batch_id, ...data, pollingMode: mode };
             activeBatchId = batch_id;
+            isOutlookBatchMode = (mode === 'outlook_batch');
             batchCompleted = false;
             batchFinalStatus = null;
             toastShown = false;
@@ -1937,10 +2515,26 @@ async function restoreActiveTask() {
             showBatchStatus({ count: total || data.total });
             updateBatchProgress(data);
             addLog('info', `[系统] 检测到进行中的批量任务，正在重连监控... (${batch_id.substring(0, 8)})`);
-            startCurrentBatchPolling(batch_id, getCurrentBatchKind());
             connectBatchWebSocket(batch_id);
         } catch {
             sessionStorage.removeItem('activeTask');
         }
+    } else if (mode === 'auto') {
+        sessionStorage.removeItem('activeTask');
+    }
+}
+
+
+async function refreshOutlookRegistrationStatus() {
+    try {
+        const ids = outlookAccounts.map(item => item.id).filter(Boolean);
+        const data = await api.post('/registration/outlook/check-accounts', { service_ids: ids });
+        outlookAccounts = data.accounts || [];
+        renderOutlookAccounts(outlookAccounts);
+        addLog('info', `[??] Outlook ??????? (???: ${data.registered_count}, ???: ${data.unregistered_count})`);
+        toast.success('Outlook ???????');
+    } catch (error) {
+        console.error('?? Outlook ??????:', error);
+        toast.error('?? Outlook ??????: ' + error.message);
     }
 }

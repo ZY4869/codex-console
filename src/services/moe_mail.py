@@ -10,7 +10,7 @@ import logging
 from typing import Optional, Dict, Any, List
 from urllib.parse import urljoin
 
-from .base import BaseEmailService, EmailServiceError, EmailServiceType, looks_like_verification_email
+from .base import BaseEmailService, EmailServiceError, EmailServiceType
 from ..core.http_client import HTTPClient, RequestConfig
 from ..config.constants import OTP_CODE_PATTERN
 
@@ -204,21 +204,6 @@ class MeoMailEmailService(BaseEmailService):
             - id: 邮箱 ID（同 service_id）
             - expiry: 过期时间信息
         """
-        request_config = {**self.config, **(config or {})}
-        existing_email = str(request_config.get("existing_email") or "").strip()
-        existing_email_id = str(request_config.get("existing_email_id") or "").strip()
-        if existing_email:
-            email_info = {
-                "email": existing_email,
-                "service_id": existing_email_id or existing_email,
-                "id": existing_email_id or existing_email,
-                "created_at": time.time(),
-                "domain": existing_email.split("@", 1)[1] if "@" in existing_email else None,
-            }
-            self._emails_cache[email_info["id"]] = email_info
-            self.update_status(True)
-            return email_info
-
         # 获取默认配置
         sys_config = self.get_config()
         default_domain = self.config.get("default_domain")
@@ -338,7 +323,7 @@ class MeoMailEmailService(BaseEmailService):
                     content = f"{sender} {subject} {message_content}"
 
                     # 检查是否是 OpenAI 邮件
-                    if not looks_like_verification_email(sender, subject, content):
+                    if "openai" not in sender and "openai" not in content.lower():
                         continue
 
                     # 提取验证码 过滤掉邮箱
@@ -358,25 +343,6 @@ class MeoMailEmailService(BaseEmailService):
 
         logger.warning(f"等待验证码超时: {email}")
         return None
-
-    def get_message_content(self, email_id: str, message_id: str) -> Optional[Dict[str, Any]]:
-        """兼容基类接口，返回标准化后的邮件详情。"""
-        detail = self.get_message_detail(email_id, message_id)
-        if not detail:
-            return None
-
-        html = str(detail.get("html", ""))
-        content = str(detail.get("content", ""))
-        if not content and html:
-            content = re.sub(r"<[^>]+>", " ", html)
-
-        return {
-            "id": message_id,
-            "content": content,
-            "html": html,
-            "subject": str(detail.get("subject", "")),
-            "from": str(detail.get("from_address") or detail.get("from", "")),
-        }
 
     def _get_message_content(self, email_id: str, message_id: str) -> Optional[str]:
         """获取邮件内容"""
@@ -429,14 +395,6 @@ class MeoMailEmailService(BaseEmailService):
             self.update_status(False, e)
             return []
 
-    def list_domains(self) -> List[str]:
-        config = self.get_config()
-        raw_domains = str(config.get("emailDomains") or "").split(",")
-        domains = [item.strip().lstrip("@") for item in raw_domains if str(item).strip()]
-        if self.config.get("default_domain") and self.config["default_domain"] not in domains:
-            domains.insert(0, str(self.config["default_domain"]).strip().lstrip("@"))
-        return domains
-
     def delete_email(self, email_id: str) -> bool:
         """
         删除邮箱
@@ -484,7 +442,7 @@ class MeoMailEmailService(BaseEmailService):
             self.update_status(False, e)
             return False
 
-    def get_email_messages(self, email_id: str, cursor: str = None, **kwargs) -> List[Dict[str, Any]]:
+    def get_email_messages(self, email_id: str, cursor: str = None) -> List[Dict[str, Any]]:
         """
         获取邮箱中的邮件列表
 
@@ -498,23 +456,10 @@ class MeoMailEmailService(BaseEmailService):
         params = {}
         if cursor:
             params["cursor"] = cursor
-        limit = kwargs.get("limit")
 
         try:
             response = self._make_request("GET", f"/api/emails/{email_id}", params=params)
-            raw_messages = response.get("messages", [])
-            messages = []
-            for message in raw_messages:
-                messages.append({
-                    "id": message.get("id"),
-                    "from": message.get("from_address") or message.get("from", ""),
-                    "subject": message.get("subject", ""),
-                    "content": message.get("content", ""),
-                    "received_at": message.get("created_at") or message.get("createdAt"),
-                    "raw_data": message,
-                })
-            if isinstance(limit, int) and limit > 0:
-                messages = messages[:limit]
+            messages = response.get("messages", [])
             self.update_status(True)
             return messages
         except Exception as e:

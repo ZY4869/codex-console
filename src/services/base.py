@@ -12,7 +12,6 @@ from ..config.constants import EmailServiceType
 
 
 logger = logging.getLogger(__name__)
-VERIFICATION_EMAIL_KEYWORDS = ("openai", "xai", "x.ai", "grok")
 
 
 class EmailServiceError(Exception):
@@ -163,6 +162,7 @@ class BaseEmailService(abc.ABC):
             if email_info.get("id") == email_id:
                 return email_info
         return None
+
     def wait_for_email(
         self,
         email: str,
@@ -204,11 +204,7 @@ class BaseEmailService(abc.ABC):
                         continue
 
                     # 检查邮箱地址
-                    if isinstance(email_data, dict):
-                        email_address = email_data.get("address") or email_data.get("email")
-                    else:
-                        email_address = email_data
-                    if email_address != email:
+                    if email_data.get("address") != email:
                         continue
 
                     # 获取邮件列表
@@ -259,15 +255,6 @@ class BaseEmailService(abc.ABC):
         """
         raise NotImplementedError("此邮箱服务不支持获取邮件列表")
 
-    def list_domains(self) -> List[str]:
-        """
-        列出当前服务可用域名（可选实现）
-
-        Returns:
-            域名列表
-        """
-        return []
-
     def get_message_content(self, email_id: str, message_id: str) -> Optional[Dict[str, Any]]:
         """
         获取邮件内容（可选实现）
@@ -303,11 +290,6 @@ class BaseEmailService(abc.ABC):
     def __str__(self) -> str:
         """字符串表示"""
         return f"{self.name} ({self.service_type.value})"
-
-
-def looks_like_verification_email(*parts: str) -> bool:
-    text = "\n".join(str(part or "") for part in parts).lower()
-    return any(keyword in text for keyword in VERIFICATION_EMAIL_KEYWORDS)
 
 
 class EmailServiceFactory:

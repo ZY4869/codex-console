@@ -14,12 +14,25 @@ import logging
 import base64
 import re
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Union, Callable
 from pathlib import Path
 
-from ..config.constants import PASSWORD_CHARSET, DEFAULT_PASSWORD_LENGTH
+from ..config.constants import PASSWORD_CHARSET, PASSWORD_SPECIAL_CHARSET, DEFAULT_PASSWORD_LENGTH
 from ..config.settings import get_settings
+from .timezone_utils import SHANGHAI_TZ
+
+
+class ShanghaiTimeFormatter(logging.Formatter):
+    """
+    强制日志 asctime 输出为上海时间，避免容器/服务器时区差异。
+    """
+
+    def formatTime(self, record, datefmt=None):  # noqa: N802
+        dt = datetime.fromtimestamp(record.created, tz=timezone.utc).astimezone(SHANGHAI_TZ)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def setup_logging(
@@ -51,7 +64,7 @@ def setup_logging(
     root_logger.handlers.clear()
 
     # 创建格式化器
-    formatter = logging.Formatter(log_format)
+    formatter = ShanghaiTimeFormatter(log_format)
 
     # 控制台处理器
     console_handler = logging.StreamHandler(sys.stdout)
@@ -84,18 +97,19 @@ def generate_password(length: int = DEFAULT_PASSWORD_LENGTH) -> str:
     Returns:
         随机密码字符串
     """
-    if length < 4:
-        length = 4
+    if length < 8:
+        length = 8
 
     # 确保密码包含至少一个大写字母、一个小写字母和一个数字
     password = [
         secrets.choice(string.ascii_lowercase),
         secrets.choice(string.ascii_uppercase),
         secrets.choice(string.digits),
+        secrets.choice(PASSWORD_SPECIAL_CHARSET),
     ]
 
     # 添加剩余字符
-    password.extend(secrets.choice(PASSWORD_CHARSET) for _ in range(length - 3))
+    password.extend(secrets.choice(PASSWORD_CHARSET) for _ in range(length - len(password)))
 
     # 随机打乱
     secrets.SystemRandom().shuffle(password)

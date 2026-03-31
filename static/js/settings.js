@@ -9,6 +9,8 @@ const elements = {
     tabContents: document.querySelectorAll('.tab-content'),
     registrationForm: document.getElementById('registration-settings-form'),
     backupBtn: document.getElementById('backup-btn'),
+    importDbBtn: document.getElementById('import-db-btn'),
+    dbImportFile: document.getElementById('db-import-file'),
     cleanupBtn: document.getElementById('cleanup-btn'),
     addEmailServiceBtn: document.getElementById('add-email-service-btn'),
     addServiceModal: document.getElementById('add-service-modal'),
@@ -30,12 +32,19 @@ const elements = {
     // 代理列表
     proxiesTable: document.getElementById('proxies-table'),
     addProxyBtn: document.getElementById('add-proxy-btn'),
+    proxyBatchImportBtn: document.getElementById('proxy-batch-import-btn'),
     testAllProxiesBtn: document.getElementById('test-all-proxies-btn'),
     addProxyModal: document.getElementById('add-proxy-modal'),
     proxyItemForm: document.getElementById('proxy-item-form'),
     closeProxyModal: document.getElementById('close-proxy-modal'),
     cancelProxyBtn: document.getElementById('cancel-proxy-btn'),
     proxyModalTitle: document.getElementById('proxy-modal-title'),
+    proxyBatchImportModal: document.getElementById('proxy-batch-import-modal'),
+    closeProxyBatchImportModal: document.getElementById('close-proxy-batch-import-modal'),
+    cancelProxyBatchImportBtn: document.getElementById('cancel-proxy-batch-import-btn'),
+    proxyBatchImportForm: document.getElementById('proxy-batch-import-form'),
+    proxyBatchImportText: document.getElementById('proxy-batch-import-text'),
+    proxyBatchImportResult: document.getElementById('proxy-batch-import-result'),
     // 动态代理设置
     dynamicProxyForm: document.getElementById('dynamic-proxy-form'),
     testDynamicProxyBtn: document.getElementById('test-dynamic-proxy-btn'),
@@ -57,9 +66,6 @@ const elements = {
     sub2ApiServiceForm: document.getElementById('sub2api-service-form'),
     sub2ApiServiceModalTitle: document.getElementById('sub2api-service-modal-title'),
     testSub2ApiServiceBtn: document.getElementById('test-sub2api-service-btn'),
-    loadSub2ApiGroupsBtn: document.getElementById('load-sub2api-groups-btn'),
-    sub2ApiGroupList: document.getElementById('sub2api-group-list'),
-    sub2ApiGroupsStatus: document.getElementById('sub2api-groups-status'),
     // Team Manager 服务管理
     addTmServiceBtn: document.getElementById('add-tm-service-btn'),
     tmServicesTable: document.getElementById('tm-services-table'),
@@ -69,18 +75,24 @@ const elements = {
     tmServiceForm: document.getElementById('tm-service-form'),
     tmServiceModalTitle: document.getElementById('tm-service-modal-title'),
     testTmServiceBtn: document.getElementById('test-tm-service-btn'),
+    addNewApiServiceBtn: document.getElementById('add-new-api-service-btn'),
+    newApiServicesTable: document.getElementById('new-api-services-table'),
+    newApiServiceEditModal: document.getElementById('new-api-service-edit-modal'),
+    closeNewApiServiceModal: document.getElementById('close-new-api-service-modal'),
+    cancelNewApiServiceBtn: document.getElementById('cancel-new-api-service-btn'),
+    newApiServiceForm: document.getElementById('new-api-service-form'),
+    newApiServiceModalTitle: document.getElementById('new-api-service-modal-title'),
+    testNewApiServiceBtn: document.getElementById('test-new-api-service-btn'),
     // 验证码设置
     emailCodeForm: document.getElementById('email-code-form'),
     // Outlook 设置
     outlookSettingsForm: document.getElementById('outlook-settings-form'),
-    // Web UI 访问控制
-    webuiSettingsForm: document.getElementById('webui-settings-form')
+    // 系统设置（端口 + 访问控制）
+    systemSettingsForm: document.getElementById('system-settings-form')
 };
 
 // 选中的服务 ID
 let selectedServiceIds = new Set();
-let _sub2apiAvailableGroups = [];
-let _sub2apiSelectedGroupIds = new Set();
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
@@ -92,6 +104,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadCpaServices();
     loadSub2ApiServices();
     loadTmServices();
+    loadNewApiServices();
     initEventListeners();
 });
 
@@ -124,6 +137,14 @@ function initEventListeners() {
     // 备份数据库
     if (elements.backupBtn) {
         elements.backupBtn.addEventListener('click', handleBackup);
+    }
+    // 导入数据库
+    if (elements.importDbBtn && elements.dbImportFile) {
+        elements.importDbBtn.addEventListener('click', () => {
+            elements.dbImportFile.value = '';
+            elements.dbImportFile.click();
+        });
+        elements.dbImportFile.addEventListener('change', handleImportDatabase);
     }
 
     // 清理数据
@@ -206,6 +227,9 @@ function initEventListeners() {
     if (elements.addProxyBtn) {
         elements.addProxyBtn.addEventListener('click', () => openProxyModal());
     }
+    if (elements.proxyBatchImportBtn) {
+        elements.proxyBatchImportBtn.addEventListener('click', openProxyBatchImportModal);
+    }
 
     if (elements.testAllProxiesBtn) {
         elements.testAllProxiesBtn.addEventListener('click', handleTestAllProxies);
@@ -230,6 +254,22 @@ function initEventListeners() {
     if (elements.proxyItemForm) {
         elements.proxyItemForm.addEventListener('submit', handleSaveProxyItem);
     }
+    if (elements.closeProxyBatchImportModal) {
+        elements.closeProxyBatchImportModal.addEventListener('click', closeProxyBatchImportModal);
+    }
+    if (elements.cancelProxyBatchImportBtn) {
+        elements.cancelProxyBatchImportBtn.addEventListener('click', closeProxyBatchImportModal);
+    }
+    if (elements.proxyBatchImportModal) {
+        elements.proxyBatchImportModal.addEventListener('click', (e) => {
+            if (e.target === elements.proxyBatchImportModal) {
+                closeProxyBatchImportModal();
+            }
+        });
+    }
+    if (elements.proxyBatchImportForm) {
+        elements.proxyBatchImportForm.addEventListener('submit', handleProxyBatchImport);
+    }
 
     // 动态代理设置
     if (elements.dynamicProxyForm) {
@@ -249,8 +289,8 @@ function initEventListeners() {
         elements.outlookSettingsForm.addEventListener('submit', handleSaveOutlookSettings);
     }
 
-    if (elements.webuiSettingsForm) {
-        elements.webuiSettingsForm.addEventListener('submit', handleSaveWebuiSettings);
+    if (elements.systemSettingsForm) {
+        elements.systemSettingsForm.addEventListener('submit', handleSaveSystemSettings);
     }
     // Team Manager 服务管理
     if (elements.addTmServiceBtn) {
@@ -272,6 +312,26 @@ function initEventListeners() {
     }
     if (elements.testTmServiceBtn) {
         elements.testTmServiceBtn.addEventListener('click', handleTestTmService);
+    }
+    if (elements.addNewApiServiceBtn) {
+        elements.addNewApiServiceBtn.addEventListener('click', () => openNewApiServiceModal());
+    }
+    if (elements.closeNewApiServiceModal) {
+        elements.closeNewApiServiceModal.addEventListener('click', closeNewApiServiceModal);
+    }
+    if (elements.cancelNewApiServiceBtn) {
+        elements.cancelNewApiServiceBtn.addEventListener('click', closeNewApiServiceModal);
+    }
+    if (elements.newApiServiceEditModal) {
+        elements.newApiServiceEditModal.addEventListener('click', (e) => {
+            if (e.target === elements.newApiServiceEditModal) closeNewApiServiceModal();
+        });
+    }
+    if (elements.newApiServiceForm) {
+        elements.newApiServiceForm.addEventListener('submit', handleSaveNewApiService);
+    }
+    if (elements.testNewApiServiceBtn) {
+        elements.testNewApiServiceBtn.addEventListener('click', handleTestNewApiService);
     }
 
     // CPA 服务管理
@@ -317,9 +377,6 @@ function initEventListeners() {
     if (elements.testSub2ApiServiceBtn) {
         elements.testSub2ApiServiceBtn.addEventListener('click', handleTestSub2ApiService);
     }
-    if (elements.loadSub2ApiGroupsBtn) {
-        elements.loadSub2ApiGroupsBtn.addEventListener('click', () => loadSub2ApiGroups());
-    }
 }
 
 // 加载设置
@@ -337,6 +394,9 @@ async function loadSettings() {
         document.getElementById('max-retries').value = data.registration?.max_retries || 3;
         document.getElementById('timeout').value = data.registration?.timeout || 120;
         document.getElementById('password-length').value = data.registration?.default_password_length || 12;
+        const entryFlowRaw = String(data.registration?.entry_flow || 'native').toLowerCase();
+        const entryFlow = entryFlowRaw === 'abcard' ? 'abcard' : 'native';
+        document.getElementById('registration-entry-flow').value = entryFlow;
         document.getElementById('sleep-min').value = data.registration?.sleep_min || 5;
         document.getElementById('sleep-max').value = data.registration?.sleep_max || 30;
 
@@ -349,12 +409,19 @@ async function loadSettings() {
         // 加载 Outlook 设置
         loadOutlookSettings();
 
-        // Web UI 访问密码提示
-        if (data.webui?.has_access_password) {
-            const input = document.getElementById('webui-access-password');
-            if (input) {
-                input.value = '';
-                input.placeholder = '已配置，留空保持不变';
+        // 系统设置（端口 + 访问密码）
+        const webuiPortInput = document.getElementById('webui-port');
+        if (webuiPortInput) {
+            webuiPortInput.value = data.webui?.port || 1455;
+        }
+        const passwordInput = document.getElementById('webui-access-password');
+        if (passwordInput) {
+            if (data.webui?.has_access_password) {
+                passwordInput.value = '';
+                passwordInput.placeholder = '已配置，留空保持不变';
+            } else {
+                passwordInput.value = '';
+                passwordInput.placeholder = '未配置，留空表示不修改';
             }
         }
 
@@ -364,22 +431,29 @@ async function loadSettings() {
     }
 }
 
-// 保存 Web UI 设置
-async function handleSaveWebuiSettings(e) {
+// 保存系统设置（端口 + 访问控制）
+async function handleSaveSystemSettings(e) {
     e.preventDefault();
 
+    const portRaw = document.getElementById('webui-port')?.value;
+    const parsedPort = parseInt(portRaw, 10);
     const accessPassword = document.getElementById('webui-access-password').value;
-    const payload = {
-        access_password: accessPassword || null
-    };
+    const payload = {};
+    if (Number.isFinite(parsedPort) && parsedPort > 0 && parsedPort <= 65535) {
+        payload.port = parsedPort;
+    }
+    if (accessPassword) {
+        payload.access_password = accessPassword;
+    }
 
     try {
         await api.post('/settings/webui', payload);
-        toast.success('Web UI 设置已更新');
+        toast.success('系统设置已更新');
         document.getElementById('webui-access-password').value = '';
+        await loadSettings();
     } catch (error) {
-        console.error('保存 Web UI 设置失败:', error);
-        toast.error('保存 Web UI 设置失败');
+        console.error('保存系统设置失败:', error);
+        toast.error('保存系统设置失败');
     }
 }
 
@@ -479,6 +553,7 @@ async function handleSaveRegistration(e) {
         max_retries: parseInt(document.getElementById('max-retries').value),
         timeout: parseInt(document.getElementById('timeout').value),
         default_password_length: parseInt(document.getElementById('password-length').value),
+        entry_flow: document.getElementById('registration-entry-flow').value || 'native',
         sleep_min: parseInt(document.getElementById('sleep-min').value),
         sleep_max: parseInt(document.getElementById('sleep-max').value),
     };
@@ -534,6 +609,48 @@ async function handleBackup() {
     } finally {
         elements.backupBtn.disabled = false;
         elements.backupBtn.textContent = '💾 备份数据库';
+    }
+}
+
+// 导入数据库
+async function handleImportDatabase() {
+    const file = elements.dbImportFile?.files?.[0];
+    if (!file) return;
+
+    const confirmed = await confirm(
+        `确定导入数据库文件「${file.name}」吗？系统会先自动备份当前数据库，再执行覆盖导入。`
+    );
+    if (!confirmed) {
+        elements.dbImportFile.value = '';
+        return;
+    }
+
+    const originText = elements.importDbBtn.textContent;
+    elements.importDbBtn.disabled = true;
+    elements.importDbBtn.innerHTML = '<span class="loading-spinner"></span> 导入中...';
+
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const resp = await fetch('/api/settings/database/import', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            throw new Error(data.detail || `HTTP ${resp.status}`);
+        }
+
+        const backupText = data.backup_path ? `，备份: ${data.backup_path}` : '';
+        toast.success(`导入成功，已覆盖数据库${backupText}`);
+        await loadDatabaseInfo();
+    } catch (error) {
+        toast.error('导入失败: ' + error.message);
+    } finally {
+        elements.dbImportFile.value = '';
+        elements.importDbBtn.disabled = false;
+        elements.importDbBtn.textContent = originText || '📥 导入数据';
     }
 }
 
@@ -779,7 +896,7 @@ async function loadProxies() {
         console.error('加载代理列表失败:', error);
         elements.proxiesTable.innerHTML = `
             <tr>
-                <td colspan="7">
+                <td colspan="8">
                     <div class="empty-state">
                         <div class="empty-state-icon">❌</div>
                         <div class="empty-state-title">加载失败</div>
@@ -795,7 +912,7 @@ function renderProxies(proxies) {
     if (!proxies || proxies.length === 0) {
         elements.proxiesTable.innerHTML = `
             <tr>
-                <td colspan="7">
+                <td colspan="8">
                     <div class="empty-state">
                         <div class="empty-state-icon">🌐</div>
                         <div class="empty-state-title">暂无代理</div>
@@ -885,6 +1002,83 @@ function openProxyModal(proxy = null) {
 function closeProxyModal() {
     elements.addProxyModal.classList.remove('active');
     elements.proxyItemForm.reset();
+}
+
+function openProxyBatchImportModal() {
+    if (!elements.proxyBatchImportModal) return;
+    if (elements.proxyBatchImportForm) {
+        elements.proxyBatchImportForm.reset();
+    }
+    if (elements.proxyBatchImportResult) {
+        elements.proxyBatchImportResult.style.display = 'none';
+        elements.proxyBatchImportResult.innerHTML = '';
+    }
+    elements.proxyBatchImportModal.classList.add('active');
+}
+
+function closeProxyBatchImportModal() {
+    if (!elements.proxyBatchImportModal) return;
+    elements.proxyBatchImportModal.classList.remove('active');
+}
+
+function renderProxyBatchImportResult(result) {
+    if (!elements.proxyBatchImportResult) return;
+    const errors = Array.isArray(result?.errors) ? result.errors : [];
+    const preview = errors.slice(0, 20).map(item => {
+        const line = Number(item?.line || 0);
+        const raw = escapeHtml(String(item?.raw || ''));
+        const error = escapeHtml(String(item?.error || '解析失败'));
+        return `<li>第 ${line} 行：${error}${raw ? `（${raw}）` : ''}</li>`;
+    }).join('');
+    elements.proxyBatchImportResult.innerHTML = `
+        <div style="display:flex;gap:12px;flex-wrap:wrap;">
+            <span>✅ 新增: <strong>${result.created || 0}</strong></span>
+            <span>🔄 更新: <strong>${result.updated || 0}</strong></span>
+            <span>⏭️ 跳过: <strong>${result.skipped || 0}</strong></span>
+            <span>❌ 失败: <strong>${result.failed || 0}</strong></span>
+        </div>
+        ${preview ? `<div style="margin-top:8px;"><strong>错误明细（最多 20 条）：</strong><ul style="margin:6px 0 0 18px;">${preview}</ul></div>` : ''}
+    `;
+    elements.proxyBatchImportResult.style.display = '';
+}
+
+async function handleProxyBatchImport(e) {
+    e.preventDefault();
+    const content = String(elements.proxyBatchImportText?.value || '').trim();
+    if (!content) {
+        toast.warning('请先粘贴代理文本');
+        return;
+    }
+
+    const submitBtn = document.getElementById('submit-proxy-batch-import-btn');
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="loading-spinner"></span> 导入中...';
+    }
+
+    try {
+        const payload = {
+            content,
+            default_type: String(document.getElementById('proxy-batch-default-type')?.value || 'http'),
+            enabled: Boolean(document.getElementById('proxy-batch-import-enabled')?.checked),
+            overwrite_existing: Boolean(document.getElementById('proxy-batch-overwrite-existing')?.checked),
+        };
+        const result = await api.post('/settings/proxies/batch-import', payload);
+        renderProxyBatchImportResult(result);
+        await loadProxies();
+        if ((result.failed || 0) > 0) {
+            toast.warning(`导入完成：新增 ${result.created || 0}，更新 ${result.updated || 0}，失败 ${result.failed || 0}`);
+        } else {
+            toast.success(`导入完成：新增 ${result.created || 0}，更新 ${result.updated || 0}，跳过 ${result.skipped || 0}`);
+        }
+    } catch (error) {
+        toast.error('批量导入失败: ' + error.message);
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = '📥 开始导入';
+        }
+    }
 }
 
 // 保存代理
@@ -1232,19 +1426,20 @@ async function loadCpaServices() {
         const services = await api.get('/cpa-services');
         renderCpaServicesTable(services);
     } catch (e) {
-        elements.cpaServicesTable.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--danger-color);">${e.message}</td></tr>`;
+        elements.cpaServicesTable.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--danger-color);">${e.message}</td></tr>`;
     }
 }
 
 function renderCpaServicesTable(services) {
     if (!services || services.length === 0) {
-        elements.cpaServicesTable.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px;">暂无 CPA 服务，点击「添加服务」新增</td></tr>';
+        elements.cpaServicesTable.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px;">暂无 CPA 服务，点击「添加服务」新增</td></tr>';
         return;
     }
     elements.cpaServicesTable.innerHTML = services.map(s => `
         <tr>
             <td>${escapeHtml(s.name)}</td>
             <td style="font-size:0.85rem;color:var(--text-muted);">${escapeHtml(s.api_url)}</td>
+            <td style="font-size:0.85rem;color:var(--text-muted);">${escapeHtml(s.proxy_url || '-')}</td>
             <td style="text-align:center;" title="${s.enabled ? '已启用' : '已禁用'}">${s.enabled ? '✅' : '⭕'}</td>
             <td style="text-align:center;">${s.priority}</td>
             <td style="white-space:nowrap;">
@@ -1261,6 +1456,7 @@ function openCpaServiceModal(service = null) {
     document.getElementById('cpa-service-name').value = service ? service.name : '';
     document.getElementById('cpa-service-url').value = service ? service.api_url : '';
     document.getElementById('cpa-service-token').value = '';
+    document.getElementById('cpa-service-proxy-url').value = service ? (service.proxy_url || '') : '';
     document.getElementById('cpa-service-priority').value = service ? service.priority : 0;
     document.getElementById('cpa-service-enabled').checked = service ? service.enabled : true;
     elements.cpaServiceModalTitle.textContent = service ? '编辑 CPA 服务' : '添加 CPA 服务';
@@ -1286,6 +1482,7 @@ async function handleSaveCpaService(e) {
     const name = document.getElementById('cpa-service-name').value.trim();
     const apiUrl = document.getElementById('cpa-service-url').value.trim();
     const apiToken = document.getElementById('cpa-service-token').value.trim();
+    const proxyUrl = document.getElementById('cpa-service-proxy-url').value.trim();
     const priority = parseInt(document.getElementById('cpa-service-priority').value) || 0;
     const enabled = document.getElementById('cpa-service-enabled').checked;
 
@@ -1299,7 +1496,7 @@ async function handleSaveCpaService(e) {
     }
 
     try {
-        const payload = { name, api_url: apiUrl, priority, enabled };
+        const payload = { name, api_url: apiUrl, proxy_url: proxyUrl, priority, enabled };
         if (apiToken) payload.api_token = apiToken;
 
         if (id) {
@@ -1387,119 +1584,6 @@ async function handleTestCpaService() {
 
 let _sub2apiEditingId = null;
 
-function setSub2ApiGroupsStatus(text, isError = false) {
-    if (!elements.sub2ApiGroupsStatus) return;
-    elements.sub2ApiGroupsStatus.textContent = text;
-    elements.sub2ApiGroupsStatus.style.color = isError ? 'var(--danger-color)' : 'var(--text-muted)';
-}
-
-function getSelectedSub2ApiGroupIds() {
-    return Array.from(_sub2apiSelectedGroupIds).sort((a, b) => a - b);
-}
-
-function renderSub2ApiGroupOptions() {
-    if (!elements.sub2ApiGroupList) return;
-
-    if (!_sub2apiAvailableGroups.length) {
-        const presetCount = _sub2apiSelectedGroupIds.size;
-        elements.sub2ApiGroupList.innerHTML = `
-            <div style="color:var(--text-muted);padding:4px 2px;">
-                ${presetCount > 0 ? `已预设 ${presetCount} 个分组，点击“加载已有分组”校验` : '暂无分组，请先加载'}
-            </div>
-        `;
-        setSub2ApiGroupsStatus(presetCount > 0 ? `已预设 ${presetCount} 个分组，尚未从服务读取` : '未加载分组');
-        return;
-    }
-
-    elements.sub2ApiGroupList.innerHTML = _sub2apiAvailableGroups.map(group => {
-        const checked = _sub2apiSelectedGroupIds.has(Number(group.id)) ? 'checked' : '';
-        const activeCount = group.active_account_count ?? group.account_count ?? 0;
-        const subscriptionType = group.subscription_type || 'standard';
-        return `
-            <label style="display:flex;gap:10px;align-items:flex-start;padding:8px;border:1px solid var(--border);border-radius:8px;cursor:pointer;">
-                <input type="checkbox" class="sub2api-group-checkbox" value="${group.id}" ${checked} style="margin-top:2px;">
-                <div style="min-width:0;">
-                    <div style="font-weight:500;">${escapeHtml(group.name || `Group ${group.id}`)}</div>
-                    <div style="font-size:0.78rem;color:var(--text-muted);line-height:1.4;">
-                        ID ${group.id} · ${escapeHtml(group.platform || 'openai')} · ${escapeHtml(group.status || 'active')} · ${escapeHtml(subscriptionType)} · 账号 ${escapeHtml(String(activeCount))}
-                    </div>
-                </div>
-            </label>
-        `;
-    }).join('');
-
-    elements.sub2ApiGroupList.querySelectorAll('.sub2api-group-checkbox').forEach(checkbox => {
-        checkbox.addEventListener('change', (event) => {
-            const groupId = parseInt(event.target.value, 10);
-            if (!Number.isFinite(groupId)) return;
-            if (event.target.checked) {
-                _sub2apiSelectedGroupIds.add(groupId);
-            } else {
-                _sub2apiSelectedGroupIds.delete(groupId);
-            }
-            const selectedCount = _sub2apiSelectedGroupIds.size;
-            const totalCount = _sub2apiAvailableGroups.length;
-            setSub2ApiGroupsStatus(selectedCount > 0 ? `已选择 ${selectedCount} / ${totalCount} 个分组` : `已加载 ${totalCount} 个分组，未选择默认分组`);
-        });
-    });
-
-    const selectedCount = _sub2apiSelectedGroupIds.size;
-    const totalCount = _sub2apiAvailableGroups.length;
-    setSub2ApiGroupsStatus(selectedCount > 0 ? `已选择 ${selectedCount} / ${totalCount} 个分组` : `已加载 ${totalCount} 个分组，未选择默认分组`);
-}
-
-async function loadSub2ApiGroups(options = {}) {
-    const serviceIdValue = options.serviceId ?? document.getElementById('sub2api-service-id').value;
-    const serviceId = serviceIdValue ? parseInt(serviceIdValue, 10) : null;
-    const apiUrl = document.getElementById('sub2api-service-url').value.trim();
-    const apiKey = document.getElementById('sub2api-service-key').value.trim();
-
-    if (!serviceId && (!apiUrl || !apiKey)) {
-        if (!options.silent) {
-            toast.error('请先填写 API URL 和 API Key');
-        }
-        return;
-    }
-
-    if (elements.loadSub2ApiGroupsBtn) {
-        elements.loadSub2ApiGroupsBtn.disabled = true;
-        elements.loadSub2ApiGroupsBtn.textContent = '加载中...';
-    }
-    setSub2ApiGroupsStatus('正在加载分组...');
-
-    try {
-        const payload = {};
-        if (serviceId) payload.service_id = serviceId;
-        if (apiUrl) payload.api_url = apiUrl;
-        if (apiKey) payload.api_key = apiKey;
-
-        const groups = await api.post('/sub2api-services/fetch-groups', payload);
-        _sub2apiAvailableGroups = Array.isArray(groups) ? groups : [];
-
-        const availableIds = new Set(_sub2apiAvailableGroups.map(group => parseInt(group.id, 10)).filter(Number.isFinite));
-        _sub2apiSelectedGroupIds = new Set(
-            Array.from(_sub2apiSelectedGroupIds).filter(groupId => availableIds.has(groupId))
-        );
-
-        renderSub2ApiGroupOptions();
-        if (!options.silent) {
-            toast.success(`已加载 ${_sub2apiAvailableGroups.length} 个分组`);
-        }
-    } catch (e) {
-        _sub2apiAvailableGroups = [];
-        renderSub2ApiGroupOptions();
-        setSub2ApiGroupsStatus('加载分组失败', true);
-        if (!options.silent) {
-            toast.error('加载分组失败: ' + e.message);
-        }
-    } finally {
-        if (elements.loadSub2ApiGroupsBtn) {
-            elements.loadSub2ApiGroupsBtn.disabled = false;
-            elements.loadSub2ApiGroupsBtn.textContent = '加载已有分组';
-        }
-    }
-}
-
 async function loadSub2ApiServices() {
     try {
         const services = await api.get('/sub2api-services');
@@ -1509,13 +1593,6 @@ async function loadSub2ApiServices() {
             elements.sub2ApiServicesTable.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px;">加载失败</td></tr>';
         }
     }
-}
-
-function formatSub2ApiFallbackName(service) {
-    const cfg = service.template_config || {};
-    const digits = Math.max(1, parseInt(cfg.name_digits, 10) || 9);
-    const nextIndex = Math.max(1, parseInt(service.next_name_index, 10) || 1);
-    return `GPT-Free-${String(nextIndex).padStart(digits, '0')}`;
 }
 
 function renderSub2ApiServices(services) {
@@ -1528,14 +1605,9 @@ function renderSub2ApiServices(services) {
         <tr>
             <td>${escapeHtml(s.name)}</td>
             <td style="font-size:0.85rem;color:var(--text-muted);">${escapeHtml(s.api_url)}</td>
+            <td style="text-align:center;">${String(s.target_type || 'sub2api').toLowerCase() === 'newapi' ? 'newApi' : 'Sub2Api'}</td>
             <td style="text-align:center;" title="${s.enabled ? '已启用' : '已禁用'}">${s.enabled ? '✅' : '⭕'}</td>
             <td style="text-align:center;">${s.priority}</td>
-            <td>
-                <div style="font-family:var(--font-mono);font-size:0.82rem;">${escapeHtml(formatSub2ApiFallbackName(s))}</div>
-                <div style="font-size:0.75rem;color:var(--text-muted);">默认分组 ${escapeHtml(String((s.template_config?.default_group_ids || []).length))} 个</div>
-                <div style="font-size:0.75rem;color:var(--text-muted);">固定前缀 GPT-，按账号身份自动命名</div>
-                <div style="font-size:0.75rem;color:var(--text-muted);">默认并发 ${escapeHtml(String(s.template_config?.default_concurrency || 1))}</div>
-            </td>
             <td style="white-space:nowrap;">
                 <button class="btn btn-secondary btn-sm" onclick="editSub2ApiService(${s.id})">编辑</button>
                 <button class="btn btn-secondary btn-sm" onclick="testSub2ApiServiceById(${s.id})">测试</button>
@@ -1550,39 +1622,23 @@ function openSub2ApiServiceModal(svc = null) {
     elements.sub2ApiServiceModalTitle.textContent = svc ? '编辑 Sub2API 服务' : '添加 Sub2API 服务';
     elements.sub2ApiServiceForm.reset();
     document.getElementById('sub2api-service-id').value = svc ? svc.id : '';
-    const templateConfig = svc?.template_config || {};
-    _sub2apiSelectedGroupIds = new Set((templateConfig.default_group_ids || []).map(id => parseInt(id, 10)).filter(Number.isFinite));
-    _sub2apiAvailableGroups = [];
-    document.getElementById('sub2api-name-prefix').value = 'GPT-';
-    document.getElementById('sub2api-next-name-index').value = svc?.next_name_index || 1;
-    document.getElementById('sub2api-name-digits').value = templateConfig.name_digits || 9;
-    document.getElementById('sub2api-default-rate-multiplier').value = templateConfig.default_rate_multiplier || 1;
-    document.getElementById('sub2api-default-concurrency').value = templateConfig.default_concurrency || 1;
-    document.getElementById('sub2api-default-priority').value = templateConfig.default_priority || 50;
-    document.getElementById('sub2api-auto-pause-on-expired').checked = templateConfig.auto_pause_on_expired !== false;
-    renderSub2ApiGroupOptions();
     if (svc) {
         document.getElementById('sub2api-service-name').value = svc.name || '';
         document.getElementById('sub2api-service-url').value = svc.api_url || '';
         document.getElementById('sub2api-service-priority').value = svc.priority ?? 0;
         document.getElementById('sub2api-service-enabled').checked = svc.enabled !== false;
+        document.getElementById('sub2api-service-target-type').value = String(svc.target_type || 'sub2api').toLowerCase() === 'newapi' ? 'newapi' : 'sub2api';
         document.getElementById('sub2api-service-key').placeholder = svc.has_key ? '已配置，留空保持不变' : '请输入 API Key';
     } else {
-        document.getElementById('sub2api-service-key').placeholder = '请输入 API Key';
+        document.getElementById('sub2api-service-target-type').value = 'sub2api';
     }
     elements.sub2ApiServiceEditModal.classList.add('active');
-    if (svc?.id) {
-        loadSub2ApiGroups({ serviceId: svc.id, silent: true });
-    }
 }
 
 function closeSub2ApiServiceModal() {
     elements.sub2ApiServiceEditModal.classList.remove('active');
     elements.sub2ApiServiceForm.reset();
     _sub2apiEditingId = null;
-    _sub2apiAvailableGroups = [];
-    _sub2apiSelectedGroupIds = new Set();
-    renderSub2ApiGroupOptions();
 }
 
 async function editSub2ApiService(id) {
@@ -1595,7 +1651,8 @@ async function editSub2ApiService(id) {
 }
 
 async function deleteSub2ApiService(id, name) {
-    if (!confirm(`确认删除 Sub2API 服务「${name}」？`)) return;
+    const confirmed = await confirm(`确认删除 Sub2API 服务「${name}」吗？`, "删除 Sub2API 服务");
+    if (!confirmed) return;
     try {
         await api.delete(`/sub2api-services/${id}`);
         toast.success('服务已删除');
@@ -1612,16 +1669,7 @@ async function handleSaveSub2ApiService(e) {
         name: document.getElementById('sub2api-service-name').value,
         api_url: document.getElementById('sub2api-service-url').value,
         api_key: document.getElementById('sub2api-service-key').value || undefined,
-        template_config: {
-            name_prefix: 'GPT-',
-            name_digits: parseInt(document.getElementById('sub2api-name-digits').value, 10) || 9,
-            default_concurrency: parseInt(document.getElementById('sub2api-default-concurrency').value, 10) || 1,
-            default_priority: parseInt(document.getElementById('sub2api-default-priority').value, 10) || 50,
-            default_rate_multiplier: parseFloat(document.getElementById('sub2api-default-rate-multiplier').value) || 1,
-            auto_pause_on_expired: document.getElementById('sub2api-auto-pause-on-expired').checked,
-            default_group_ids: getSelectedSub2ApiGroupIds(),
-        },
-        next_name_index: parseInt(document.getElementById('sub2api-next-name-index').value, 10) || 1,
+        target_type: document.getElementById('sub2api-service-target-type').value || 'sub2api',
         priority: parseInt(document.getElementById('sub2api-service-priority').value) || 0,
         enabled: document.getElementById('sub2api-service-enabled').checked,
     };
@@ -1693,6 +1741,162 @@ async function handleTestSub2ApiService() {
     } finally {
         elements.testSub2ApiServiceBtn.disabled = false;
         elements.testSub2ApiServiceBtn.textContent = '🔌 测试连接';
+    }
+}
+
+async function loadNewApiServices() {
+    if (!elements.newApiServicesTable) return;
+    try {
+        const services = await api.get('/new-api-services');
+        renderNewApiServicesTable(services);
+    } catch (e) {
+        elements.newApiServicesTable.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--danger-color);">${e.message}</td></tr>`;
+    }
+}
+
+function renderNewApiServicesTable(services) {
+    if (!services || services.length === 0) {
+        elements.newApiServicesTable.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px;">暂无 new-api 服务，点击「添加服务」新增</td></tr>';
+        return;
+    }
+    elements.newApiServicesTable.innerHTML = services.map(s => `
+        <tr>
+            <td>${escapeHtml(s.name)}</td>
+            <td style="font-size:0.85rem;color:var(--text-muted);">${escapeHtml(s.api_url)}<br><span style="font-size:0.75rem;color:var(--text-muted);">${escapeHtml(s.username || '')}</span></td>
+            <td style="text-align:center;" title="${s.enabled ? '已启用' : '已禁用'}">${s.enabled ? '✅' : '⭕'}</td>
+            <td style="text-align:center;">${s.priority}</td>
+            <td style="white-space:nowrap;">
+                <button class="btn btn-secondary btn-sm" onclick="editNewApiService(${s.id})">编辑</button>
+                <button class="btn btn-secondary btn-sm" onclick="testNewApiServiceById(${s.id})">测试</button>
+                <button class="btn btn-danger btn-sm" onclick="deleteNewApiService(${s.id}, '${escapeHtml(s.name)}')">删除</button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function openNewApiServiceModal(service = null) {
+    document.getElementById('new-api-service-id').value = service ? service.id : '';
+    document.getElementById('new-api-service-name').value = service ? service.name : '';
+    document.getElementById('new-api-service-url').value = service ? service.api_url : '';
+    document.getElementById('new-api-service-username').value = service ? (service.username || '') : '';
+    document.getElementById('new-api-service-password').value = '';
+    document.getElementById('new-api-service-priority').value = service ? service.priority : 0;
+    document.getElementById('new-api-service-enabled').checked = service ? service.enabled : true;
+    document.getElementById('new-api-service-password').placeholder = service && service.has_password ? '已配置，留空保持不变' : '请输入管理员密码';
+    elements.newApiServiceModalTitle.textContent = service ? '编辑 new-api 服务' : '添加 new-api 服务';
+    elements.newApiServiceEditModal.classList.add('active');
+}
+
+function closeNewApiServiceModal() {
+    elements.newApiServiceEditModal.classList.remove('active');
+}
+
+async function editNewApiService(id) {
+    try {
+        const service = await api.get(`/new-api-services/${id}`);
+        openNewApiServiceModal(service);
+    } catch (e) {
+        toast.error('获取服务信息失败: ' + e.message);
+    }
+}
+
+async function handleSaveNewApiService(e) {
+    e.preventDefault();
+    const id = document.getElementById('new-api-service-id').value;
+    const name = document.getElementById('new-api-service-name').value.trim();
+    const apiUrl = document.getElementById('new-api-service-url').value.trim();
+    const username = document.getElementById('new-api-service-username').value.trim();
+    const password = document.getElementById('new-api-service-password').value.trim();
+    const priority = parseInt(document.getElementById('new-api-service-priority').value) || 0;
+    const enabled = document.getElementById('new-api-service-enabled').checked;
+
+    if (!name || !apiUrl || !username) {
+        toast.error('名称、API URL 和管理员用户名不能为空');
+        return;
+    }
+    if (!id && !password) {
+        toast.error('新增服务时管理员密码不能为空');
+        return;
+    }
+
+    try {
+        const payload = { name, api_url: apiUrl, username, priority, enabled };
+        if (password) payload.password = password;
+
+        if (id) {
+            await api.patch(`/new-api-services/${id}`, payload);
+            toast.success('服务已更新');
+        } else {
+            await api.post('/new-api-services', payload);
+            toast.success('服务已添加');
+        }
+        closeNewApiServiceModal();
+        loadNewApiServices();
+    } catch (e) {
+        toast.error('保存失败: ' + e.message);
+    }
+}
+
+async function deleteNewApiService(id, name) {
+    const confirmed = await confirm(`确定要删除 new-api 服务「${name}」吗？`);
+    if (!confirmed) return;
+    try {
+        await api.delete(`/new-api-services/${id}`);
+        toast.success('已删除');
+        loadNewApiServices();
+    } catch (e) {
+        toast.error('删除失败: ' + e.message);
+    }
+}
+
+async function testNewApiServiceById(id) {
+    try {
+        const result = await api.post(`/new-api-services/${id}/test`);
+        if (result.success) {
+            toast.success(result.message);
+        } else {
+            toast.error(result.message);
+        }
+    } catch (e) {
+        toast.error('测试失败: ' + e.message);
+    }
+}
+
+async function handleTestNewApiService() {
+    const apiUrl = document.getElementById('new-api-service-url').value.trim();
+    const username = document.getElementById('new-api-service-username').value.trim();
+    const password = document.getElementById('new-api-service-password').value.trim();
+    const id = document.getElementById('new-api-service-id').value;
+
+    if (!apiUrl || !username) {
+        toast.error('请先填写 API URL 和管理员用户名');
+        return;
+    }
+    if (!id && !password) {
+        toast.error('请先填写管理员密码');
+        return;
+    }
+
+    elements.testNewApiServiceBtn.disabled = true;
+    elements.testNewApiServiceBtn.textContent = '测试中...';
+
+    try {
+        let result;
+        if (id && !password) {
+            result = await api.post(`/new-api-services/${id}/test`);
+        } else {
+            result = await api.post('/new-api-services/test-connection', { api_url: apiUrl, username, password });
+        }
+        if (result.success) {
+            toast.success(result.message);
+        } else {
+            toast.error(result.message);
+        }
+    } catch (e) {
+        toast.error('测试失败: ' + e.message);
+    } finally {
+        elements.testNewApiServiceBtn.disabled = false;
+        elements.testNewApiServiceBtn.textContent = '🔌 测试连接';
     }
 }
 
