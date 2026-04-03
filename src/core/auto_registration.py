@@ -166,9 +166,11 @@ class AutoRegistrationCoordinator:
         self._wake_event.set()
         self._task.cancel()
         try:
-            await self._task
+            await asyncio.wait_for(self._task, timeout=2.0)
         except asyncio.CancelledError:
             pass
+        except asyncio.TimeoutError:
+            logger.warning("自动注册协调器停止超时，后台任务将继续等待事件循环回收")
         finally:
             self._task = None
 
@@ -205,7 +207,7 @@ class AutoRegistrationCoordinator:
                 return None
 
             add_auto_registration_log("[自动注册] 开始检查 CPA auth-files 库存")
-            plan = await asyncio.to_thread(self._plan_builder, settings)
+            plan = self._plan_builder(settings)
             if not plan:
                 update_auto_registration_state(
                     status="idle",

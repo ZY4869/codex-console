@@ -1170,7 +1170,12 @@ class TeamOrchestrator:
             merged["success_count"] += item.get("success_count", 0)
             merged["failed_count"] += item.get("failed_count", 0)
             merged["skipped_count"] += item.get("skipped_count", 0)
-            merged["details"].extend(item.get("details", []))
+            details = list(item.get("details", []))
+            merged["details"].extend(details)
+            guard_blocked = sum(1 for detail in details if detail.get("guard_blocked") and not detail.get("success"))
+            if guard_blocked:
+                merged["failed_count"] = max(0, merged["failed_count"] - guard_blocked)
+                merged["skipped_count"] += guard_blocked
         return merged
 
     def _read_team_email_snapshot(

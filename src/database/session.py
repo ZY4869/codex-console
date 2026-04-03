@@ -10,7 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 import os
 import logging
 
-from .models import Base
+from .models import Base, EmailRegistrationStat
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +212,7 @@ class DatabaseSessionManager:
         # 需要检查和添加的新列
         migrations = [
             # (表名, 列名, 列类型)
+            ("accounts", "remark", "TEXT"),
             ("accounts", "cpa_uploaded", "BOOLEAN DEFAULT 0"),
             ("accounts", "cpa_uploaded_at", "DATETIME"),
             ("accounts", "source", "VARCHAR(20) DEFAULT 'register'"),
@@ -227,6 +228,8 @@ class DatabaseSessionManager:
             ("accounts", "subscription_at", "DATETIME"),
             ("accounts", "cookies", "TEXT"),
             ("cpa_services", "proxy_url", "VARCHAR(1000)"),
+            ("sub2api_services", "template_config", "TEXT"),
+            ("sub2api_services", "next_name_index", "INTEGER DEFAULT 1"),
             ("sub2api_services", "target_type", "VARCHAR(50) DEFAULT 'sub2api'"),
             ("proxies", "is_default", "BOOLEAN DEFAULT 0"),
             ("bind_card_tasks", "checkout_session_id", "VARCHAR(120)"),
@@ -238,6 +241,7 @@ class DatabaseSessionManager:
 
         # 确保新表存在（create_tables 已处理，此处兜底）
         Base.metadata.create_all(bind=self.engine)
+        EmailRegistrationStat.__table__.create(bind=self.engine, checkfirst=True)
 
         with self.engine.connect() as conn:
             # 数据迁移：将旧的 custom_domain 记录统一为 moe_mail

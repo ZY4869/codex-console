@@ -45,6 +45,7 @@ class Account(Base):
     client_id = Column(String(255))  # OAuth Client ID
     account_id = Column(String(255))
     workspace_id = Column(String(255))
+    remark = Column(Text)
     email_service = Column(String(50), nullable=False)  # 'tempmail', 'outlook', 'moe_mail'
     email_service_id = Column(String(255))  # 邮箱服务中的ID
     proxy_used = Column(String(255))
@@ -78,6 +79,7 @@ class Account(Base):
             'id': self.id,
             'email': self.email,
             'password': self.password,
+            'remark': self.remark,
             'client_id': self.client_id,
             'email_service': self.email_service,
             'account_id': self.account_id,
@@ -138,6 +140,45 @@ class RegistrationTask(Base):
 
     # 关系
     email_service = relationship('EmailService')
+
+
+class EmailRegistrationStat(Base):
+    """按完整邮箱地址累计的注册统计。"""
+    __tablename__ = "email_registration_stats"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email_address = Column(String(255), nullable=False, unique=True, index=True)
+    email_domain = Column(String(255), index=True)
+    email_service = Column(String(50), index=True)
+    total_attempts = Column(Integer, default=0)
+    success_count = Column(Integer, default=0)
+    failure_count = Column(Integer, default=0)
+    add_phone_count = Column(Integer, default=0)
+    last_status = Column(String(40), index=True)
+    last_error = Column(Text)
+    last_used_at = Column(DateTime, default=utcnow_naive, index=True)
+    last_add_phone_at = Column(DateTime)
+    created_at = Column(DateTime, default=utcnow_naive)
+    updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "email": self.email_address,
+            "email_address": self.email_address,
+            "email_domain": self.email_domain,
+            "email_service": self.email_service,
+            "total_attempts": int(self.total_attempts or 0),
+            "success_count": int(self.success_count or 0),
+            "failure_count": int(self.failure_count or 0),
+            "add_phone_count": int(self.add_phone_count or 0),
+            "last_status": self.last_status,
+            "last_error": self.last_error,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "last_add_phone_at": self.last_add_phone_at.isoformat() if self.last_add_phone_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
 
 
 class BindCardTask(Base):
@@ -327,6 +368,8 @@ class Sub2ApiService(Base):
     name = Column(String(100), nullable=False)  # 服务名称
     api_url = Column(String(500), nullable=False)  # API URL (host)
     api_key = Column(Text, nullable=False)  # x-api-key
+    template_config = Column(JSONEncodedDict)
+    next_name_index = Column(Integer, default=1)
     target_type = Column(String(50), nullable=False, default='sub2api')  # sub2api/newapi
     enabled = Column(Boolean, default=True)
     priority = Column(Integer, default=0)  # 优先级
@@ -445,3 +488,8 @@ class Proxy(Base):
             auth = f"{self.username}:{self.password}@"
 
         return f"{scheme}://{auth}{self.host}:{self.port}"
+
+
+# 导入本地扩展模型，确保 Base.metadata 能注册这些表并保持旧代码导入路径兼容。
+from .team_models import TeamTask, TeamMember, TeamInviteTask, TeamInviteMember  # noqa: E402
+from .grok_models import GrokRegisterTask, GrokRegisterAccount  # noqa: E402

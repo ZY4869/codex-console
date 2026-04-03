@@ -3,6 +3,7 @@ ChatGPT 注册客户端模块
 使用 curl_cffi 模拟浏览器行为
 """
 
+from dataclasses import dataclass, field
 import random
 import uuid
 import time
@@ -47,6 +48,17 @@ _CHROME_PROFILES = [
         "sec_ch_ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
     },
 ]
+
+
+@dataclass
+class RegisterUserResult:
+    """Structured result for the password registration request."""
+
+    success: bool
+    status_code: int = 0
+    error_message: str = ""
+    response_state: FlowState = field(default_factory=FlowState)
+    raw_text: str = ""
 
 
 def _random_chrome_version():
@@ -112,7 +124,7 @@ class ChatGPTClient:
         seed_oai_device_cookie(self.session, self.device_id)
         self.last_registration_state = FlowState()
     
-    def _log(self, msg):
+    def _log(self, msg, level=None):
         """输出日志"""
         if self.verbose:
             print(f"  {msg}")
@@ -231,6 +243,10 @@ class ChatGPTClient:
     def _state_is_add_phone(self, state: FlowState):
         target = f"{state.continue_url} {state.current_url}".lower()
         return state.page_type == "add_phone" or "add-phone" in target
+
+    def _state_is_login_password(self, state: FlowState):
+        target = f"{state.continue_url} {state.current_url}".lower()
+        return state.page_type == "login_password" or ("login" in target and "password" in target)
 
     def _state_requires_navigation(self, state: FlowState):
         if (state.method or "GET").upper() != "GET":
@@ -425,7 +441,10 @@ class ChatGPTClient:
             )
             
             if r.status_code == 200:
-                data = r.json()
+                try:
+                    data = r.json() or {}
+                except Exception:
+                    data = {}
                 token = data.get("csrfToken", "")
                 if token:
                     self._log(f"CSRF token: {token[:20]}...")
@@ -542,17 +561,41 @@ class ChatGPTClient:
             referer=referer or f"{self.AUTH}/about-you",
         )
         return ok
-    
-    def register_user(self, email, password):
-        """
-        注册用户（邮箱 + 密码）
-        
-        Returns:
-            tuple: (success, message)
-        """
-        self._log(f"注册用户: {email}")
+
+    @staticmethod
+    def _is_generic_register_failure(result: RegisterUserResult) -> bool:
+        message = str(getattr(result, "error_message", "") or "").lower()
+        return (
+            int(getattr(result, "status_code", 0) or 0) == 400
+            and "failed to create account" in message
+            and "please try again" in message
+        )
+
+    def _probe_register_recovery_state(self, register_result: RegisterUserResult) -> FlowState:
+        response_state = getattr(register_result, "response_state", None) or FlowState()
+        response_page = str(response_state.page_type or "").strip().lower()
+        if response_page and response_page not in {"create_account_password", "password"}:
+            if self._state_requires_navigation(response_state):
+                ok, next_state = self._follow_flow_state(
+                    response_state,
+                    referer=response_state.current_url or f"{self.AUTH}/create-account/password",
+                )
+                if ok:
+                    return next_state
+            return response_state
+
+        probe_state = self._state_from_url(f"{self.AUTH}/create-account/password")
+        ok, next_state = self._follow_flow_state(
+            probe_state,
+            referer=f"{self.AUTH}/create-account/password",
+        )
+        if ok:
+            return next_state
+        return response_state or probe_state
+
+    def _register_user_result(self, email, password) -> RegisterUserResult:
         url = f"{self.AUTH}/api/accounts/user/register"
-        
+
         headers = self._headers(
             url,
             accept="application/json",
@@ -562,32 +605,76 @@ class ChatGPTClient:
             fetch_site="same-origin",
         )
         headers.update(generate_datadog_trace())
-        
+
         payload = {
             "username": email,
             "password": password,
         }
-        
+
         try:
-            self._browser_pause()
+            # 模拟用户在密码页上的填写停顿（1.5~3.5 秒）
+            random_delay(1.5, 3.5)
             r = self.session.post(url, json=payload, headers=headers, timeout=30)
-            
+            response_url = str(getattr(r, "url", "") or f"{self.AUTH}/create-account/password")
+
             if r.status_code == 200:
-                data = r.json()
-                self._log("注册成功")
-                return True, "注册成功"
-            else:
                 try:
-                    error_data = r.json()
-                    error_msg = error_data.get("error", {}).get("message", r.text[:200])
-                except:
-                    error_msg = r.text[:200]
-                self._log(f"注册失败: {r.status_code} - {error_msg}")
-                return False, f"HTTP {r.status_code}: {error_msg}"
-                
+                    data = r.json() or {}
+                except Exception:
+                    data = {}
+                state = self._state_from_payload(data, current_url=response_url) if data else self._state_from_url(response_url)
+                self._log("注册成功")
+                return RegisterUserResult(
+                    success=True,
+                    status_code=200,
+                    error_message="注册成功",
+                    response_state=state,
+                    raw_text=str(getattr(r, "text", "") or "")[:200],
+                )
+
+            try:
+                error_data = r.json() or {}
+                error_msg = error_data.get("error", {}).get("message", "") or str(getattr(r, "text", "") or "")[:200]
+                state = self._state_from_payload(error_data, current_url=response_url)
+            except Exception:
+                error_msg = str(getattr(r, "text", "") or "")[:200]
+                state = self._state_from_url(response_url)
+
+            formatted_message = f"HTTP {r.status_code}: {error_msg}".strip()
+            self._log(f"注册失败: {r.status_code} - {error_msg}")
+            # 详细诊断：记录完整响应头和 cookies 以便排查反爬策略
+            cf_ray = r.headers.get("cf-ray", "")
+            cf_mitigated = r.headers.get("cf-mitigated", "")
+            if cf_ray or cf_mitigated:
+                self._log(f"register diagnostics: cf-ray={cf_ray} cf-mitigated={cf_mitigated}")
+            return RegisterUserResult(
+                success=False,
+                status_code=int(r.status_code or 0),
+                error_message=formatted_message,
+                response_state=state,
+                raw_text=str(getattr(r, "text", "") or "")[:200],
+            )
         except Exception as e:
             self._log(f"注册异常: {e}")
-            return False, str(e)
+            return RegisterUserResult(
+                success=False,
+                status_code=0,
+                error_message=str(e),
+                response_state=self._state_from_url(f"{self.AUTH}/create-account/password"),
+            )
+    
+    def register_user(self, email, password, return_result=False):
+        """
+        注册用户（邮箱 + 密码）
+        
+        Returns:
+            tuple: (success, message)
+        """
+        self._log(f"注册用户: {email}")
+        result = self._register_user_result(email, password)
+        if return_result:
+            return result
+        return result.success, ("注册成功" if result.success else result.error_message)
     
     def send_email_otp(self):
         """触发发送邮箱验证码"""
@@ -731,7 +818,16 @@ class ChatGPTClient:
             self._log(f"创建异常: {e}")
             return False, str(e)
     
-    def register_complete_flow(self, email, password, first_name, last_name, birthdate, skymail_client):
+    def register_complete_flow(
+        self,
+        email,
+        password,
+        first_name,
+        last_name,
+        birthdate,
+        skymail_client,
+        adaptive_register_recovery=False,
+    ):
         """
         完整的注册流程（基于原版 run_register 方法）
         
@@ -748,7 +844,7 @@ class ChatGPTClient:
         """
         from urllib.parse import urlparse
         
-        max_auth_attempts = 3
+        max_auth_attempts = 2
         final_url = ""
         final_path = ""
 
@@ -819,6 +915,63 @@ class ChatGPTClient:
                 self._log("全新注册流程")
                 if register_submitted:
                     return False, "注册密码阶段重复进入"
+                if adaptive_register_recovery:
+                    register_result = self.register_user(
+                        email,
+                        password,
+                        return_result=True,
+                    )
+                    if not register_result.success:
+                        response_state = getattr(register_result, "response_state", None) or FlowState()
+                        self._log(
+                            "register_user structured failure: "
+                            f"status={register_result.status_code}, "
+                            f"message={register_result.error_message}, "
+                            f"page={response_state.page_type or '-'}"
+                        )
+                        if self._is_generic_register_failure(register_result):
+                            self._log("400 后进入状态纠偏", "warning")
+                            recovered_state = self._probe_register_recovery_state(register_result)
+                            self._log(f"状态纠偏命中: {describe_flow_state(recovered_state)}")
+                            if self._state_is_email_otp(recovered_state):
+                                register_submitted = True
+                                state = recovered_state
+                                self.last_registration_state = state
+                                self._log("400 被忽略，继续进入验证码阶段", "warning")
+                                continue
+                            if self._state_is_about_you(recovered_state):
+                                register_submitted = True
+                                otp_verified = True
+                                state = recovered_state
+                                self.last_registration_state = state
+                                self._log("400 被忽略，继续进入 about_you 阶段", "warning")
+                                continue
+                            if self._state_is_add_phone(recovered_state):
+                                self.last_registration_state = recovered_state
+                                self._log("400 被忽略，纠偏后命中 add_phone 阶段", "warning")
+                                return True, "add_phone_required"
+                            if self._state_is_login_password(recovered_state):
+                                self._log("纠偏后恢复到登录密码页，非注册流程，按失败处理", "warning")
+                                return False, f"注册失败: 纠偏后进入登录流程 ({register_result.error_message})"
+                            if (
+                                self._is_registration_complete_state(recovered_state)
+                                or str(recovered_state.page_type or "").strip().lower()
+                                in {"external_url", "callback", "oauth_callback", "chatgpt_home"}
+                            ):
+                                register_submitted = True
+                                otp_verified = True
+                                account_created = True
+                                state = recovered_state
+                                self.last_registration_state = state
+                                self._log("400 被忽略，继续进入回调 / session 阶段", "warning")
+                                continue
+                            self._log("纠偏后仍停留密码页，按失败处理", "warning")
+                        return False, f"注册失败: {register_result.error_message}"
+                    register_submitted = True
+                    if not self.send_email_otp():
+                        self._log("发送验证码接口返回失败，继续等待邮箱中的验证码...")
+                    state = self._state_from_url(f"{self.AUTH}/email-verification")
+                    continue
                 success, msg = self.register_user(email, password)
                 if not success:
                     return False, f"注册失败: {msg}"

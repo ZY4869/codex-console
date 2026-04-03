@@ -19,6 +19,7 @@ from ..config.constants import (
 from .models import (
     Account,
     EmailService,
+    EmailRegistrationStat,
     RegistrationTask,
     Setting,
     Proxy,
@@ -30,6 +31,10 @@ from .models import (
     BindCardTask,
     TeamInviteRecord,
     OperationAuditLog,
+    TeamTask,
+    TeamMember,
+    TeamInviteTask,
+    TeamInviteMember,
 )
 
 
@@ -51,6 +56,7 @@ def create_account(
     refresh_token: Optional[str] = None,
     id_token: Optional[str] = None,
     cookies: Optional[str] = None,
+    remark: Optional[str] = None,
     proxy_used: Optional[str] = None,
     expires_at: Optional['datetime'] = None,
     extra_data: Optional[Dict[str, Any]] = None,
@@ -87,6 +93,7 @@ def create_account(
         refresh_token=refresh_token,
         id_token=id_token,
         cookies=cookies,
+        remark=remark,
         proxy_used=proxy_used,
         expires_at=expires_at,
         extra_data=extra_data or {},
@@ -187,6 +194,10 @@ def update_account(
                 db_account.priority = int(value)
             except Exception:
                 db_account.priority = 50
+            continue
+
+        if key in {"remark", "cookies", "session_token", "extra_data"} and hasattr(db_account, key):
+            setattr(db_account, key, value)
             continue
 
         if hasattr(db_account, key) and value is not None:
@@ -372,6 +383,179 @@ def delete_email_service(db: Session, service_id: int) -> bool:
 
 
 # ============================================================================
+# 邮箱注册统计 CRUD
+# ============================================================================
+
+def get_email_registration_stat_by_email(db: Session, email_address: str) -> Optional[EmailRegistrationStat]:
+    """根据完整邮箱地址获取累计注册统计。"""
+    normalized_email = str(email_address or "").strip().lower()
+    if not normalized_email:
+        return None
+    return db.query(EmailRegistrationStat).filter(EmailRegistrationStat.email_address == normalized_email).first()
+
+
+def count_email_registration_stats(db: Session) -> int:
+    """获取邮箱累计统计总数。"""
+    return db.query(func.count(EmailRegistrationStat.id)).scalar() or 0
+
+
+def count_email_domain_registration_stats(db: Session) -> int:
+    """鑾峰彇鎸夐偖绠卞悗缂€鍚嶈仛鍚堢殑缁熻鎬绘暟銆?"""
+    return (
+        db.query(func.count(func.distinct(EmailRegistrationStat.email_domain)))
+        .filter(
+            EmailRegistrationStat.email_domain.isnot(None),
+            EmailRegistrationStat.email_domain != "",
+        )
+        .scalar()
+        or 0
+    )
+
+
+def get_email_registration_stats(
+    db: Session,
+    skip: int = 0,
+    limit: int = 50,
+) -> List[EmailRegistrationStat]:
+    """分页获取邮箱累计统计，按最近使用时间倒序。"""
+    return (
+        db.query(EmailRegistrationStat)
+        .order_by(desc(EmailRegistrationStat.last_used_at), desc(EmailRegistrationStat.updated_at))
+        .offset(max(0, skip))
+        .limit(max(1, limit))
+        .all()
+    )
+
+
+def get_email_domain_registration_stats(
+    db: Session,
+    skip: int = 0,
+    limit: int = 50,
+):
+    """鍒嗛〉鑾峰彇鎸夐偖绠卞悗缂€鍚嶈仛鍚堢殑娉ㄥ唽缁熻銆?"""
+    last_used_at = func.max(EmailRegistrationStat.last_used_at).label("last_used_at")
+    updated_at = func.max(EmailRegistrationStat.updated_at).label("updated_at")
+
+    return (
+        db.query(
+            EmailRegistrationStat.email_domain.label("email_domain"),
+            func.sum(EmailRegistrationStat.total_attempts).label("total_attempts"),
+            func.sum(EmailRegistrationStat.success_count).label("success_count"),
+            func.sum(EmailRegistrationStat.failure_count).label("failure_count"),
+            func.sum(EmailRegistrationStat.add_phone_count).label("add_phone_count"),
+            last_used_at,
+            updated_at,
+        )
+        .filter(
+            EmailRegistrationStat.email_domain.isnot(None),
+            EmailRegistrationStat.email_domain != "",
+        )
+        .group_by(EmailRegistrationStat.email_domain)
+        .order_by(desc(last_used_at), desc(updated_at))
+        .offset(max(0, skip))
+        .limit(max(1, limit))
+        .all()
+    )
+
+
+def get_email_domain_registration_summary(db: Session) -> Dict[str, Any]:
+    """返回按邮箱后缀聚合后的全量摘要。"""
+    filters = (
+        EmailRegistrationStat.email_domain.isnot(None),
+        EmailRegistrationStat.email_domain != "",
+    )
+    summary_row = (
+        db.query(
+            func.count(func.distinct(EmailRegistrationStat.email_domain)).label("total_domains"),
+            func.coalesce(func.sum(EmailRegistrationStat.total_attempts), 0).label("total_attempts"),
+            func.coalesce(func.sum(EmailRegistrationStat.success_count), 0).label("success_count"),
+            func.coalesce(func.sum(EmailRegistrationStat.failure_count), 0).label("failure_count"),
+            func.coalesce(func.sum(EmailRegistrationStat.add_phone_count), 0).label("add_phone_count"),
+        )
+        .filter(*filters)
+        .one()
+    )
+    top_attempts = func.sum(EmailRegistrationStat.total_attempts).label("top_domain_attempts")
+    top_last_used_at = func.max(EmailRegistrationStat.last_used_at).label("top_last_used_at")
+    top_domain_row = (
+        db.query(
+            EmailRegistrationStat.email_domain.label("email_domain"),
+            top_attempts,
+            top_last_used_at,
+        )
+        .filter(*filters)
+        .group_by(EmailRegistrationStat.email_domain)
+        .order_by(desc(top_attempts), desc(top_last_used_at), asc(EmailRegistrationStat.email_domain))
+        .first()
+    )
+
+    total_attempts = int(getattr(summary_row, "total_attempts", 0) or 0)
+    success_count = int(getattr(summary_row, "success_count", 0) or 0)
+    return {
+        "total_domains": int(getattr(summary_row, "total_domains", 0) or 0),
+        "total_attempts": total_attempts,
+        "success_count": success_count,
+        "failure_count": int(getattr(summary_row, "failure_count", 0) or 0),
+        "add_phone_count": int(getattr(summary_row, "add_phone_count", 0) or 0),
+        "success_rate": round((success_count / total_attempts) * 100, 1) if total_attempts > 0 else 0.0,
+        "top_domain": getattr(top_domain_row, "email_domain", None),
+        "top_domain_attempts": int(getattr(top_domain_row, "top_domain_attempts", 0) or 0),
+    }
+
+
+def record_email_registration_attempt(
+    db: Session,
+    *,
+    email_address: str,
+    email_service: Optional[str],
+    status: str,
+    error_message: Optional[str] = None,
+    occurred_at: Optional[datetime] = None,
+) -> Optional[EmailRegistrationStat]:
+    """按完整邮箱地址累计一次注册结果。"""
+    normalized_email = str(email_address or "").strip().lower()
+    if not normalized_email or "@" not in normalized_email:
+        return None
+
+    timestamp = occurred_at or utcnow_naive()
+    email_domain = normalized_email.split("@", 1)[1].strip().lower() if "@" in normalized_email else ""
+    normalized_status = str(status or "").strip().lower() or "failed"
+
+    stat = get_email_registration_stat_by_email(db, normalized_email)
+    if not stat:
+        stat = EmailRegistrationStat(
+            email_address=normalized_email,
+            email_domain=email_domain or None,
+            email_service=str(email_service or "").strip() or None,
+            total_attempts=0,
+            success_count=0,
+            failure_count=0,
+            add_phone_count=0,
+            created_at=timestamp,
+        )
+        db.add(stat)
+
+    stat.email_domain = email_domain or stat.email_domain
+    stat.email_service = str(email_service or "").strip() or stat.email_service
+    stat.total_attempts = int(stat.total_attempts or 0) + 1
+    stat.last_status = normalized_status
+    stat.last_error = str(error_message or "").strip() or None
+    stat.last_used_at = timestamp
+
+    if normalized_status == "success":
+        stat.success_count = int(stat.success_count or 0) + 1
+    elif normalized_status == "add_phone":
+        stat.add_phone_count = int(stat.add_phone_count or 0) + 1
+        stat.last_add_phone_at = timestamp
+    else:
+        stat.failure_count = int(stat.failure_count or 0) + 1
+
+    db.commit()
+    db.refresh(stat)
+    return stat
+
+
+# ============================================================================
 # 注册任务 CRUD
 # ============================================================================
 
@@ -461,8 +645,262 @@ def delete_registration_task(db: Session, task_uuid: str) -> bool:
 
 
 # 为 API 路由添加别名
+def create_team_task(
+    db: Session,
+    task_uuid: str,
+    email_service_id: Optional[int],
+    workspace_name: str = "MyTeam",
+    proxy: Optional[str] = None,
+    email_domain: Optional[str] = None,
+    upload_config: Optional[Dict[str, Any]] = None,
+) -> TeamTask:
+    team_task = TeamTask(
+        task_uuid=task_uuid,
+        email_service_id=email_service_id,
+        workspace_name=workspace_name,
+        proxy=proxy,
+        email_domain=email_domain,
+        upload_config=upload_config or {},
+        status="pending",
+    )
+    db.add(team_task)
+    db.commit()
+    db.refresh(team_task)
+    return team_task
+
+
+def get_team_task_by_uuid(db: Session, task_uuid: str) -> Optional[TeamTask]:
+    return db.query(TeamTask).filter(TeamTask.task_uuid == task_uuid).first()
+
+
+def get_team_task_by_id(db: Session, team_task_id: int) -> Optional[TeamTask]:
+    return db.query(TeamTask).filter(TeamTask.id == team_task_id).first()
+
+
+def list_team_tasks(
+    db: Session,
+    status: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+) -> List[TeamTask]:
+    query = db.query(TeamTask)
+    if status:
+        query = query.filter(TeamTask.status == status)
+    return query.order_by(desc(TeamTask.created_at)).offset(skip).limit(limit).all()
+
+
+def update_team_task(db: Session, task_uuid: str, **kwargs) -> Optional[TeamTask]:
+    team_task = get_team_task_by_uuid(db, task_uuid)
+    if not team_task:
+        return None
+
+    for key, value in kwargs.items():
+        if hasattr(team_task, key):
+            setattr(team_task, key, value)
+
+    db.commit()
+    db.refresh(team_task)
+    return team_task
+
+
+def append_team_task_log(db: Session, task_uuid: str, log_message: str) -> bool:
+    team_task = get_team_task_by_uuid(db, task_uuid)
+    if not team_task:
+        return False
+
+    team_task.logs = f"{team_task.logs}\n{log_message}" if team_task.logs else log_message
+    db.commit()
+    return True
+
+
+def delete_team_task(db: Session, task_uuid: str) -> bool:
+    team_task = get_team_task_by_uuid(db, task_uuid)
+    if not team_task:
+        return False
+
+    db.delete(team_task)
+    db.commit()
+    return True
+
+
+def create_team_member(
+    db: Session,
+    team_task_id: int,
+    order_index: int,
+    role: str,
+    registration_task_uuid: Optional[str] = None,
+    account_id: Optional[int] = None,
+) -> TeamMember:
+    member = TeamMember(
+        team_task_id=team_task_id,
+        order_index=order_index,
+        role=role,
+        registration_task_uuid=registration_task_uuid,
+        account_id=account_id,
+        invitation_status="pending",
+    )
+    db.add(member)
+    db.commit()
+    db.refresh(member)
+    return member
+
+
+def get_team_member_by_id(db: Session, member_id: int) -> Optional[TeamMember]:
+    return db.query(TeamMember).filter(TeamMember.id == member_id).first()
+
+
+def get_team_members(db: Session, team_task_id: int) -> List[TeamMember]:
+    return (
+        db.query(TeamMember)
+        .filter(TeamMember.team_task_id == team_task_id)
+        .order_by(asc(TeamMember.order_index))
+        .all()
+    )
+
+
+def update_team_member(db: Session, member_id: int, **kwargs) -> Optional[TeamMember]:
+    member = get_team_member_by_id(db, member_id)
+    if not member:
+        return None
+
+    for key, value in kwargs.items():
+        if hasattr(member, key):
+            setattr(member, key, value)
+
+    db.commit()
+    db.refresh(member)
+    return member
+
+
+def create_team_invite_task(
+    db: Session,
+    task_uuid: str,
+    source_mode: str,
+    source_account_id: Optional[int] = None,
+    source_team_task_id: Optional[int] = None,
+    proxy: Optional[str] = None,
+    upload_config: Optional[Dict[str, Any]] = None,
+) -> TeamInviteTask:
+    task = TeamInviteTask(
+        task_uuid=task_uuid,
+        source_mode=source_mode,
+        source_account_id=source_account_id,
+        source_team_task_id=source_team_task_id,
+        proxy=proxy,
+        upload_config=upload_config or {},
+        status="pending",
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def get_team_invite_task_by_uuid(db: Session, task_uuid: str) -> Optional[TeamInviteTask]:
+    return db.query(TeamInviteTask).filter(TeamInviteTask.task_uuid == task_uuid).first()
+
+
+def list_team_invite_tasks(
+    db: Session,
+    status: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+) -> List[TeamInviteTask]:
+    query = db.query(TeamInviteTask)
+    if status:
+        query = query.filter(TeamInviteTask.status == status)
+    return query.order_by(desc(TeamInviteTask.created_at)).offset(skip).limit(limit).all()
+
+
+def update_team_invite_task(db: Session, task_uuid: str, **kwargs) -> Optional[TeamInviteTask]:
+    task = get_team_invite_task_by_uuid(db, task_uuid)
+    if not task:
+        return None
+
+    for key, value in kwargs.items():
+        if hasattr(task, key):
+            setattr(task, key, value)
+
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def append_team_invite_task_log(db: Session, task_uuid: str, log_message: str) -> bool:
+    task = get_team_invite_task_by_uuid(db, task_uuid)
+    if not task:
+        return False
+
+    task.logs = f"{task.logs}\n{log_message}" if task.logs else log_message
+    db.commit()
+    return True
+
+
+def delete_team_invite_task(db: Session, task_uuid: str) -> bool:
+    task = get_team_invite_task_by_uuid(db, task_uuid)
+    if not task:
+        return False
+
+    db.delete(task)
+    db.commit()
+    return True
+
+
+def create_team_invite_member(
+    db: Session,
+    team_invite_task_id: int,
+    order_index: int,
+    email: str,
+    source_type: str,
+    account_id: Optional[int] = None,
+    source_team_task_id: Optional[int] = None,
+) -> TeamInviteMember:
+    member = TeamInviteMember(
+        team_invite_task_id=team_invite_task_id,
+        order_index=order_index,
+        email=email,
+        source_type=source_type,
+        account_id=account_id,
+        source_team_task_id=source_team_task_id,
+        invitation_status="pending",
+    )
+    db.add(member)
+    db.commit()
+    db.refresh(member)
+    return member
+
+
+def get_team_invite_member_by_id(db: Session, member_id: int) -> Optional[TeamInviteMember]:
+    return db.query(TeamInviteMember).filter(TeamInviteMember.id == member_id).first()
+
+
+def get_team_invite_members(db: Session, team_invite_task_id: int) -> List[TeamInviteMember]:
+    return (
+        db.query(TeamInviteMember)
+        .filter(TeamInviteMember.team_invite_task_id == team_invite_task_id)
+        .order_by(asc(TeamInviteMember.order_index))
+        .all()
+    )
+
+
+def update_team_invite_member(db: Session, member_id: int, **kwargs) -> Optional[TeamInviteMember]:
+    member = get_team_invite_member_by_id(db, member_id)
+    if not member:
+        return None
+
+    for key, value in kwargs.items():
+        if hasattr(member, key):
+            setattr(member, key, value)
+
+    db.commit()
+    db.refresh(member)
+    return member
+
+
 get_account = get_account_by_id
 get_registration_task = get_registration_task_by_uuid
+get_team_task = get_team_task_by_uuid
+get_team_invite_task = get_team_invite_task_by_uuid
 
 
 # ============================================================================
@@ -822,6 +1260,8 @@ def create_sub2api_service(
     name: str,
     api_url: str,
     api_key: str,
+    template_config: Optional[Dict[str, Any]] = None,
+    next_name_index: Optional[int] = 1,
     target_type: str = 'sub2api',
     enabled: bool = True,
     priority: int = 0
@@ -831,6 +1271,8 @@ def create_sub2api_service(
         name=name,
         api_url=api_url,
         api_key=api_key,
+        template_config=template_config,
+        next_name_index=max(1, int(next_name_index or 1)),
         target_type=target_type,
         enabled=enabled,
         priority=priority,
@@ -863,6 +1305,8 @@ def update_sub2api_service(db: Session, service_id: int, **kwargs) -> Optional[S
     if not svc:
         return None
     for key, value in kwargs.items():
+        if key == "next_name_index":
+            value = max(1, int(value or 1))
         setattr(svc, key, value)
     db.commit()
     db.refresh(svc)

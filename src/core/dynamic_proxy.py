@@ -10,6 +10,35 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def normalize_proxy_input(raw: str) -> Optional[str]:
+    """
+    将用户输入的代理字符串规范化为标准代理 URL。
+
+    支持格式：
+    - 标准 URL: http://user:pass@host:port, socks5://host:port
+    - 冒号分隔: host:port:username:password
+    - 简单 host:port
+    """
+    if not raw or not raw.strip():
+        return None
+
+    raw = raw.strip()
+
+    if re.match(r"^(https?|socks5)://", raw):
+        return raw
+
+    parts = raw.split(":", 3)
+    if len(parts) == 4:
+        host, port_str, username, password = parts
+        if port_str.isdigit():
+            return f"http://{username}:{password}@{host}:{port_str}"
+
+    if len(parts) == 2 and parts[1].isdigit():
+        return f"http://{raw}"
+
+    return f"http://{raw}"
+
+
 def fetch_dynamic_proxy(api_url: str, api_key: str = "", api_key_header: str = "X-API-Key", result_field: str = "") -> Optional[str]:
     """
     从代理 API 获取代理 URL

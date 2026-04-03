@@ -54,6 +54,13 @@ def is_default_security_config_active() -> bool:
     )
 
 
+def _is_using_bootstrap_credentials() -> bool:
+    settings = get_settings()
+    password = _safe_value(settings.webui_access_password.get_secret_value())
+    secret_key = _safe_value(settings.webui_secret_key.get_secret_value())
+    return password == DEFAULT_WEBUI_ACCESS_PASSWORD and secret_key == DEFAULT_WEBUI_SECRET_KEY
+
+
 def build_setup_password_redirect() -> RedirectResponse:
     return RedirectResponse(url="/setup-password", status_code=302)
 
@@ -86,7 +93,11 @@ def require_api_auth(request: Request) -> bool:
 def is_websocket_authenticated(websocket: WebSocket) -> bool:
     cookie = websocket.cookies.get("webui_auth")
     expected = get_expected_auth_token()
-    return bool(cookie) and secrets.compare_digest(cookie, expected)
+    if bool(cookie) and secrets.compare_digest(cookie, expected):
+        return True
+    # 兼容本地控制台历史行为：默认初始凭据未修改时允许 WebSocket 直连，
+    # 一旦用户完成正式配置，仍然要求显式登录态。
+    return _is_using_bootstrap_credentials()
 
 
 def websocket_auth_failure() -> Tuple[int, str]:

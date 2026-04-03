@@ -29,6 +29,7 @@
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/card-pool" class="nav-link">卡池</a>
                 <a href="/auto-team" class="nav-link">team</a>
+                <a href="/grok" class="nav-link">Grok注册</a>
                 <a href="/logs" class="nav-link">后台日志</a>
                 <a href="/settings" class="nav-link active">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
@@ -473,7 +474,7 @@ user:pass@127.0.0.1:7890
 
             <!-- Sub2API 服务编辑模态框 -->
             <div class="modal" id="sub2api-service-edit-modal">
-                <div class="modal-content" style="max-width: 500px;">
+                <div class="modal-content" style="max-width: 640px;">
                     <div class="modal-header">
                         <h3 id="sub2api-service-modal-title">添加 Sub2API 服务</h3>
                         <button class="modal-close" id="close-sub2api-service-modal">&times;</button>
@@ -499,6 +500,16 @@ user:pass@127.0.0.1:7890
                                     <option value="sub2api">Sub2Api</option>
                                     <option value="newapi">newApi</option>
                                 </select>
+                            </div>
+                            <div class="form-group" id="sub2api-service-group-settings">
+                                <label for="sub2api-service-default-group-ids">默认上传分组</label>
+                                <input type="text" id="sub2api-service-default-group-ids" placeholder="例如: 11,12">
+                                <p class="hint">保存后该服务在账号上传和自动上传时会优先绑定这些分组，多个分组用英文逗号分隔。</p>
+                                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+                                    <button type="button" class="btn btn-secondary btn-sm" id="sub2api-service-load-groups-btn">加载远端分组</button>
+                                    <span class="hint" id="sub2api-service-groups-status">可手动填写分组 ID，或先加载远端分组后勾选。</span>
+                                </div>
+                                <div id="sub2api-service-groups-list" class="multi-select-dropdown" style="margin-top:10px;"></div>
                             </div>
                             <div class="form-row">
                                 <div class="form-group">
@@ -630,6 +641,7 @@ user:pass@127.0.0.1:7890
                                         <option value="native">原本注册入口链路（当前默认）</option>
                                         <option value="abcard">ABCard 入口链路</option>
                                     </select>
+                                    <span class="hint">仅作用于“旧协议注册”流程；增强协议注册与浏览器注册不使用这里的入口链路配置。</span>
                                     <span class="hint">切换后将影响后续新建注册任务的入口流程；Outlook 邮箱会自动使用 Outlook 链路，无需手动设置</span>
                                 </div>
                             </div>

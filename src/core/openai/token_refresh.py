@@ -371,6 +371,32 @@ class TokenRefreshManager:
             return False, f"验证异常: {str(e)}"
 
 
+def _build_refresh_update_data(result: TokenRefreshResult) -> Dict[str, Any]:
+    update_data: Dict[str, Any] = {
+        "access_token": result.access_token,
+        "last_refresh": utcnow_naive(),
+    }
+    if result.refresh_token:
+        update_data["refresh_token"] = result.refresh_token
+    if result.expires_at:
+        update_data["expires_at"] = result.expires_at
+    return update_data
+
+
+def _should_try_refresh_after_validation_failure(account: Account, error: Optional[str]) -> bool:
+    error_text = str(error or "").lower()
+    has_refresh_hint = bool(str(account.session_token or "").strip())
+    if not has_refresh_hint:
+        has_refresh_hint = bool(
+            TokenRefreshManager._extract_session_token_from_cookies(getattr(account, "cookies", None))
+        )
+    if not has_refresh_hint:
+        has_refresh_hint = bool(str(account.refresh_token or "").strip())
+    if not has_refresh_hint:
+        return False
+    return any(marker in error_text for marker in ("401", "invalid", "unauthorized", "expired", "过期"))
+
+
 def refresh_account_token(account_id: int, proxy_url: Optional[str] = None) -> TokenRefreshResult:
     """
     刷新指定账号的 Token 并更新数据库
@@ -391,19 +417,7 @@ def refresh_account_token(account_id: int, proxy_url: Optional[str] = None) -> T
         result = manager.refresh_account(account)
 
         if result.success:
-            # 更新数据库
-            update_data = {
-                "access_token": result.access_token,
-                "last_refresh": utcnow_naive()
-            }
-
-            if result.refresh_token:
-                update_data["refresh_token"] = result.refresh_token
-
-            if result.expires_at:
-                update_data["expires_at"] = result.expires_at
-
-            crud.update_account(db, account_id, **update_data)
+            crud.update_account(db, account_id, **_build_refresh_update_data(result))
 
         return result
 
@@ -440,6 +454,23 @@ def validate_account_token(
             account.access_token,
             timeout_seconds=max(5, int(timeout_seconds or 30)),
         )
+
+        if not is_valid and _should_try_refresh_after_validation_failure(account, error):
+            logger.info("Access token 校验失败，尝试自动刷新后复检: email=%s", account.email)
+            refresh_result = manager.refresh_account(account)
+            if refresh_result.success and refresh_result.access_token:
+                crud.update_account(db, account_id, **_build_refresh_update_data(refresh_result))
+                account.access_token = refresh_result.access_token
+                if refresh_result.refresh_token:
+                    account.refresh_token = refresh_result.refresh_token
+                is_valid, error = manager.validate_token(
+                    account.access_token,
+                    timeout_seconds=max(5, int(timeout_seconds or 30)),
+                )
+                if is_valid:
+                    logger.info("账号通过 session/refresh token 自动刷新恢复: email=%s", account.email)
+            elif refresh_result.error_message and not error:
+                error = refresh_result.error_message
 
         # 验证后回写账号状态，确保列表状态与验证结果一致。
         error_text = str(error or "").lower()

@@ -28,6 +28,27 @@ from .sentinel_token import build_sentinel_token
 class OAuthClient:
     """OAuth 客户端 - 用于获取 Access Token 和 Refresh Token"""
     
+    @staticmethod
+    def _normalize_oauth_issuer(value):
+        raw = str(value or "").strip() or "https://auth.openai.com"
+        parsed = urlparse(raw)
+        if not (parsed.scheme and parsed.netloc):
+            return raw.rstrip("/")
+
+        path = (parsed.path or "").rstrip("/")
+        for suffix in ("/oauth/authorize", "/oauth/token"):
+            if path.endswith(suffix):
+                path = path[: -len(suffix)]
+                break
+
+        normalized = parsed._replace(
+            path=path or "",
+            params="",
+            query="",
+            fragment="",
+        ).geturl()
+        return normalized.rstrip("/")
+
     def __init__(self, config, proxy=None, verbose=True, browser_mode="protocol"):
         """
         初始化 OAuth 客户端
@@ -39,7 +60,9 @@ class OAuthClient:
             browser_mode: protocol | headless | headed
         """
         self.config = dict(config or {})
-        self.oauth_issuer = self.config.get("oauth_issuer", "https://auth.openai.com")
+        self.oauth_issuer = self._normalize_oauth_issuer(
+            self.config.get("oauth_issuer", "https://auth.openai.com")
+        )
         self.oauth_client_id = self.config.get("oauth_client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
         self.oauth_redirect_uri = self.config.get("oauth_redirect_uri", "http://localhost:1455/auth/callback")
         self.proxy = proxy

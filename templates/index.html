@@ -73,6 +73,82 @@
             font-size: 0.8125rem;
         }
 
+        .email-stats-table-wrapper {
+            max-height: 320px;
+            overflow: auto;
+        }
+
+        .email-stats-table {
+            width: 100%;
+        }
+
+        .email-stats-table th,
+        .email-stats-table td {
+            padding: var(--spacing-sm) var(--spacing-md);
+            font-size: 0.75rem;
+            vertical-align: top;
+            word-break: break-word;
+        }
+
+        .email-stats-summary {
+            color: var(--text-muted);
+            font-size: 0.75rem;
+        }
+
+        .email-stats-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: var(--spacing-sm);
+            margin-top: var(--spacing-sm);
+        }
+
+        .domain-stats-overview {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: var(--spacing-sm);
+            margin-bottom: var(--spacing-md);
+        }
+
+        .domain-stats-chip {
+            border: 1px solid var(--border-light);
+            border-radius: 12px;
+            background: var(--surface-hover);
+            padding: 10px 12px;
+            min-width: 0;
+        }
+
+        .domain-stats-chip-wide {
+            grid-column: span 2;
+        }
+
+        .domain-stats-chip-label {
+            display: block;
+            color: var(--text-muted);
+            font-size: 0.72rem;
+            margin-bottom: 4px;
+        }
+
+        .domain-stats-chip-value {
+            display: block;
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            font-weight: 700;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .domain-stats-overview-empty {
+            padding: 10px 12px;
+            border: 1px dashed var(--border-light);
+            border-radius: 12px;
+            background: var(--surface-hover);
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            margin-bottom: var(--spacing-md);
+        }
+
         .password-cell {
             font-family: var(--font-mono);
             font-size: 0.75rem;
@@ -300,6 +376,20 @@
         .msd-item input[type=checkbox] { margin: 0; cursor: pointer; }
         .msd-empty { padding: 8px 12px; color: var(--text-muted); font-size: 0.8rem; }
 
+        .selection-panel {
+            padding: var(--spacing-sm);
+            border: 1px solid var(--border-light);
+            border-radius: var(--radius);
+            background: var(--surface-hover);
+        }
+
+        .selection-note {
+            margin-top: var(--spacing-xs);
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            line-height: 1.5;
+        }
+
         /* 响应式 */
         @media (max-width: 1024px) {
             .two-column-layout {
@@ -316,6 +406,14 @@
 
             .schedule-form-grid {
                 grid-template-columns: 1fr;
+            }
+
+            .domain-stats-overview {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .domain-stats-chip-wide {
+                grid-column: 1 / -1;
             }
         }
     </style>
@@ -334,6 +432,7 @@
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/card-pool" class="nav-link">卡池</a>
                 <a href="/auto-team" class="nav-link">team</a>
+                <a href="/grok" class="nav-link">Grok注册</a>
                 <a href="/logs" class="nav-link">后台日志</a>
                 <a href="/settings" class="nav-link">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
@@ -398,6 +497,80 @@
                                         <option value="imap_mail">IMAP 邮箱</option>
                                         <option value="outlook_batch:all">Outlook 批量注册</option>
                                     </select>
+                                </div>
+
+                                <div class="form-group" id="registration-selection-group">
+                                    <label style="font-weight: 500; margin-bottom: var(--spacing-xs); display: block;">选择策略</label>
+                                    <div class="selection-panel">
+                                        <label style="display: flex; align-items: center; gap: var(--spacing-sm); cursor: pointer;">
+                                            <input type="checkbox" id="random-email-service">
+                                            <span>随机选同类型邮箱服务</span>
+                                        </label>
+                                        <label id="random-outlook-account-group" style="display: none; align-items: center; gap: var(--spacing-sm); cursor: pointer; margin-top: 6px;">
+                                            <input type="checkbox" id="random-outlook-account">
+                                            <span>随机选 Outlook 账号</span>
+                                        </label>
+                                        <label id="random-domain-group" style="display: none; align-items: center; gap: var(--spacing-sm); cursor: pointer; margin-top: 6px;">
+                                            <input type="checkbox" id="random-domain">
+                                            <span>随机选域名（仅勾选时随机）</span>
+                                        </label>
+                                        <label id="subdomain-only-group" style="display: none; align-items: center; gap: var(--spacing-sm); cursor: pointer; margin-top: 6px;">
+                                            <input type="checkbox" id="subdomain-only">
+                                            <span>仅子域名（只允许 a.example.com 一类域名）</span>
+                                        </label>
+                                        <div id="service-options-section" style="display: none; margin-top: var(--spacing-sm);">
+                                            <div style="display: flex; justify-content: space-between; align-items: center; gap: var(--spacing-sm); margin-bottom: var(--spacing-xs);">
+                                                <span style="font-size: 0.8125rem; font-weight: 500;">地址 / 域名候选</span>
+                                                <button type="button" class="btn btn-ghost btn-sm" id="refresh-service-options-btn">刷新</button>
+                                            </div>
+                                            <div id="service-options-note" class="selection-note" style="display: none;"></div>
+                                            <div class="form-group" id="domain-select-group" style="display: none; margin-bottom: var(--spacing-sm);">
+                                                <label style="font-size: 0.8125rem;">可选域名</label>
+                                                <div class="multi-select-dropdown" id="domain-select"></div>
+                                                <div style="display: flex; gap: var(--spacing-xs); margin-top: var(--spacing-xs);">
+                                                    <button type="button" class="btn btn-ghost btn-sm" id="domain-select-all-btn">全选</button>
+                                                    <button type="button" class="btn btn-ghost btn-sm" id="domain-select-clear-btn">清空</button>
+                                                </div>
+                                                <div class="selection-note">可选择部分或全部域名。只有勾选“随机选域名”后才会随机；未勾选时，单次注册使用第 1 个选中域名，批量注册按所选顺序轮转。</div>
+                                            </div>
+                                            <div class="form-group" id="email-address-select-group" style="display: none; margin-bottom: 0;">
+                                                <label style="font-size: 0.8125rem;">可选邮箱地址</label>
+                                                <div class="multi-select-dropdown" id="email-address-select"></div>
+                                                <div style="display: flex; gap: var(--spacing-xs); margin-top: var(--spacing-xs);">
+                                                    <button type="button" class="btn btn-ghost btn-sm" id="email-address-select-all-btn">全选</button>
+                                                    <button type="button" class="btn btn-ghost btn-sm" id="email-address-select-clear-btn">清空</button>
+                                                </div>
+                                                <div class="selection-note">会从邮箱 API 读取已有地址。多选地址默认按顺序轮转，不会随机；“随机选 Outlook 账号”只影响 Outlook 账号选择。</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="form-group" id="registration-flow-group">
+                                    <label style="font-weight: 500; margin-bottom: var(--spacing-xs); display: block;">注册流程</label>
+                                    <div class="selection-panel" style="display: flex; flex-direction: column; gap: 6px;">
+                                        <label style="display: flex; align-items: center; gap: var(--spacing-sm); cursor: pointer;">
+                                            <input type="radio" id="registration-flow-legacy" name="registration_flow" value="protocol.legacy" checked>
+                                            <span>旧协议注册（默认）</span>
+                                        </label>
+                                        <label style="display: flex; align-items: center; gap: var(--spacing-sm); cursor: pointer;">
+                                            <input type="radio" id="registration-flow-enhanced" name="registration_flow" value="protocol.enhanced">
+                                            <span>增强协议注册</span>
+                                        </label>
+                                        <label style="display: flex; align-items: center; gap: var(--spacing-sm); cursor: pointer;">
+                                            <input type="radio" id="registration-flow-adaptive" name="registration_flow" value="protocol.adaptive">
+                                            <span>状态纠偏协议注册（测试）</span>
+                                        </label>
+                                        <label style="display: flex; align-items: center; gap: var(--spacing-sm); cursor: pointer;">
+                                            <input type="radio" id="registration-flow-browser" name="registration_flow" value="browser">
+                                            <span>浏览器注册</span>
+                                        </label>
+                                        <div class="selection-note">设置页里的 `native / abcard` 入口切换仅作用于旧协议注册；浏览器注册会调用现有 camoufox 流程。</div>
+                                    </div>
+                                </div>
+
+                                <div class="form-group" id="registration-flow-outlook-note" style="display: none;">
+                                    <div class="selection-note">当前是 Outlook 批量注册，固定走现有协议链路，不参与“旧协议 / 增强协议 / 浏览器”切换。</div>
                                 </div>
 
                                 <!-- Outlook 批量注册区域 -->
@@ -831,6 +1004,92 @@
                                         </tr>
                                     </tbody>
                                 </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>📮 邮箱统计</h3>
+                            <div style="display: flex; align-items: center; gap: var(--spacing-sm);">
+                                <span id="email-stats-summary" class="email-stats-summary">最近 0 / 0 条</span>
+                                <button class="btn btn-ghost btn-sm" id="refresh-email-stats-btn">🔄 刷新</button>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div id="email-domain-stats-overview" class="domain-stats-overview">
+                                <div class="domain-stats-overview-empty">正在汇总后缀统计...</div>
+                            </div>
+                            <div class="email-stats-table-wrapper">
+                                <table class="data-table email-stats-table">
+                                    <thead>
+                                        <tr>
+                                            <th>邮箱地址</th>
+                                            <th>邮箱服务</th>
+                                            <th>总尝试</th>
+                                            <th>成功</th>
+                                            <th>失败</th>
+                                            <th>add_phone</th>
+                                            <th>最后状态</th>
+                                            <th>最后错误</th>
+                                            <th>最近使用</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="email-stats-table">
+                                        <tr>
+                                            <td colspan="9">
+                                                <div class="empty-state" style="padding: var(--spacing-md);">
+                                                    <div class="empty-state-icon">📮</div>
+                                                    <div class="empty-state-title">正在加载邮箱统计...</div>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div class="email-stats-footer">
+                                <span class="email-stats-summary">统计按完整邮箱地址长期累计，任务完成后会刷新一次。</span>
+                                <button class="btn btn-secondary btn-sm" id="load-more-email-stats-btn" style="display: none;">加载更多</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>🌐 后缀统计</h3>
+                            <div style="display: flex; align-items: center; gap: var(--spacing-sm);">
+                                <span id="email-domain-stats-summary" class="email-stats-summary">最近 0 / 0 个后缀</span>
+                                <button class="btn btn-ghost btn-sm" id="refresh-email-domain-stats-btn">🔄 刷新</button>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="email-stats-table-wrapper">
+                                <table class="data-table email-stats-table">
+                                    <thead>
+                                        <tr>
+                                            <th>邮箱后缀</th>
+                                            <th>总尝试</th>
+                                            <th>成功</th>
+                                            <th>失败</th>
+                                            <th>add_phone</th>
+                                            <th>最近使用</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="email-domain-stats-table">
+                                        <tr>
+                                            <td colspan="6">
+                                                <div class="empty-state" style="padding: var(--spacing-md);">
+                                                    <div class="empty-state-icon">🌐</div>
+                                                    <div class="empty-state-title">正在加载后缀统计...</div>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div class="email-stats-footer">
+                                <span class="email-stats-summary">统计按邮箱后缀名聚合，失败列不包含 add_phone。</span>
+                                <button class="btn btn-secondary btn-sm" id="load-more-email-domain-stats-btn" style="display: none;">加载更多</button>
                             </div>
                         </div>
                     </div>

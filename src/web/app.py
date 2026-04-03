@@ -369,6 +369,27 @@ def create_app() -> FastAPI:
             return redirect_response
         return _render_template(request, "auto_team.html")
 
+    @app.get("/team", response_class=HTMLResponse)
+    async def team_page(request: Request):
+        redirect_response = _guard_page_request(request)
+        if redirect_response:
+            return redirect_response
+        return _render_template(request, "team.html")
+
+    @app.get("/team/invite", response_class=HTMLResponse)
+    async def team_invite_page(request: Request):
+        redirect_response = _guard_page_request(request)
+        if redirect_response:
+            return redirect_response
+        return _render_template(request, "team_invite.html")
+
+    @app.get("/grok", response_class=HTMLResponse)
+    async def grok_register_page(request: Request):
+        redirect_response = _guard_page_request(request)
+        if redirect_response:
+            return redirect_response
+        return _render_template(request, "grok_register.html")
+
     @app.get("/logs", response_class=HTMLResponse)
     async def logs_page(request: Request):
         redirect_response = _guard_page_request(request)

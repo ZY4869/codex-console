@@ -5,16 +5,16 @@ Any-auto-register 风格注册流程（V2）。
 
 from __future__ import annotations
 
+import random
 import secrets
 import string
 import time
-from datetime import datetime
-from typing import Optional, Callable, Dict, Any
+from typing import Any, Callable, Dict, Optional
 
 from .chatgpt_client import ChatGPTClient
 from .oauth_client import OAuthClient
-from .utils import generate_random_name, generate_random_birthday, decode_jwt_payload
-from ...config.constants import PASSWORD_CHARSET, PASSWORD_SPECIAL_CHARSET, DEFAULT_PASSWORD_LENGTH
+from .utils import decode_jwt_payload, generate_random_birthday, generate_random_name
+from ...config.constants import DEFAULT_PASSWORD_LENGTH, PASSWORD_CHARSET, PASSWORD_SPECIAL_CHARSET
 from ...config.settings import get_settings
 
 
@@ -62,6 +62,7 @@ class AnyAutoRegistrationEngine:
         max_retries: int = 3,
         browser_mode: str = "protocol",
         extra_config: Optional[Dict[str, Any]] = None,
+        check_cancelled: Optional[Callable[[], bool]] = None,
     ):
         self.email_service = email_service
         self.proxy_url = proxy_url
@@ -69,6 +70,7 @@ class AnyAutoRegistrationEngine:
         self.max_retries = max(1, int(max_retries or 1))
         self.browser_mode = browser_mode or "protocol"
         self.extra_config = dict(extra_config or {})
+        self._check_cancelled = check_cancelled or (lambda: False)
 
         self.email: Optional[str] = None
         self.inbox_email: Optional[str] = None
@@ -77,9 +79,121 @@ class AnyAutoRegistrationEngine:
         self.session = None
         self.device_id: Optional[str] = None
 
+        self.same_email_retry_limit = max(1, int(self.extra_config.get("same_email_retry_limit", 4) or 4))
+        self._reuse_email_on_next_attempt = False
+        self._current_email_failure_streak = 0
+        self._last_passwordless_oauth_error = ""
+        self._last_oauth_enrichment_error = ""
+
     def _log(self, message: str):
         if self.callback_logger:
             self.callback_logger(message)
+
+    def _is_cancel_requested(self) -> bool:
+        try:
+            return bool(self._check_cancelled())
+        except Exception:
+            return False
+
+    def _raise_if_cancelled(self, reason: str = "任务已取消") -> None:
+        if self._is_cancel_requested():
+            raise RuntimeError(reason)
+
+    def _sleep_interruptible(self, seconds: float) -> None:
+        remaining = max(0.0, float(seconds or 0.0))
+        while remaining > 0:
+            self._raise_if_cancelled("任务在等待阶段被取消")
+            chunk = min(0.2, remaining)
+            time.sleep(chunk)
+            remaining -= chunk
+
+    def _clear_current_email(self, reset_failure_streak: bool = False) -> None:
+        self.email = None
+        self.inbox_email = None
+        self.email_info = None
+        if reset_failure_streak:
+            self._current_email_failure_streak = 0
+
+    def _prepare_email_for_attempt(self) -> Optional[str]:
+        if self._reuse_email_on_next_attempt and self.email_info:
+            raw_email = str((self.email_info or {}).get("email") or self.email or "").strip()
+            if raw_email:
+                normalized_email = raw_email.lower()
+                self.inbox_email = raw_email
+                self.email = normalized_email
+                try:
+                    self.email_info["email"] = normalized_email
+                except Exception:
+                    pass
+                self._reuse_email_on_next_attempt = False
+                self._log(
+                    f"复用同一个邮箱继续重试 ({self._current_email_failure_streak}/{self.same_email_retry_limit}): {normalized_email}"
+                )
+                return normalized_email
+
+            self._reuse_email_on_next_attempt = False
+            self._clear_current_email(reset_failure_streak=True)
+
+        self.password = None
+        self.email_info = self.email_service.create_email()
+        raw_email = str((self.email_info or {}).get("email") or "").strip()
+        if not raw_email:
+            return None
+
+        normalized_email = raw_email.lower()
+        self.inbox_email = raw_email
+        self.email = normalized_email
+        self._current_email_failure_streak = 0
+        try:
+            self.email_info["email"] = normalized_email
+        except Exception:
+            pass
+
+        if raw_email != normalized_email:
+            self._log(f"邮箱规范化: {raw_email} -> {normalized_email}")
+        return normalized_email
+
+    def _schedule_retry(self, attempt: int, reason: str, *, prefer_same_email: bool = False) -> bool:
+        if attempt >= self.max_retries - 1:
+            return False
+
+        detail = str(reason or "").strip()
+        if detail:
+            self._log(detail)
+
+        if prefer_same_email and self.email_info and self.email:
+            self._current_email_failure_streak += 1
+            if self._current_email_failure_streak < self.same_email_retry_limit:
+                self._reuse_email_on_next_attempt = True
+                self._log(
+                    f"准备整流程重试，并复用同一个邮箱 ({self._current_email_failure_streak}/{self.same_email_retry_limit}): {self.email}"
+                )
+                return True
+
+            self._log(
+                f"同一个邮箱连续失败 {self._current_email_failure_streak}/{self.same_email_retry_limit}，判定该邮箱异常，下轮更换新邮箱: {self.email}"
+            )
+            self._reuse_email_on_next_attempt = False
+            self._clear_current_email(reset_failure_streak=True)
+            return True
+
+        self._reuse_email_on_next_attempt = False
+        self._clear_current_email(reset_failure_streak=True)
+        self._log("准备整流程重试，下轮将重新创建邮箱")
+        return True
+
+    @staticmethod
+    def _build_add_phone_failure_payload(error_message: str = "add_phone_required") -> Dict[str, Any]:
+        detail = str(error_message or "add_phone_required").strip() or "add_phone_required"
+        return {
+            "success": False,
+            "error_message": detail,
+            "metadata": {
+                "phone_verification_required": True,
+                "token_pending": False,
+                "oauth_error": detail,
+            },
+        }
 
     @staticmethod
     def _build_password(length: int) -> str:
@@ -101,10 +215,10 @@ class AnyAutoRegistrationEngine:
             "tls",
             "ssl",
             "curl: (35)",
-            "预授权被拦截",
             "authorize",
             "registration_disallowed",
             "http 400",
+            "failed to create account",
             "创建账号失败",
             "未获取到 authorization code",
             "consent",
@@ -115,6 +229,7 @@ class AnyAutoRegistrationEngine:
             "session",
             "accesstoken",
             "next-auth",
+            "add_phone",
         ]
         return any(marker.lower() in text for marker in retriable_markers)
 
@@ -152,7 +267,8 @@ class AnyAutoRegistrationEngine:
         skymail_adapter: EmailServiceAdapter,
         oauth_config: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
-        self._log("检测到 add_phone，尝试 passwordless OTP 登录补全 workspace...")
+        self._last_passwordless_oauth_error = ""
+        self._log("检测到 add_phone，尝试通过 passwordless OTP 补全 OAuth token...")
         oauth_client = OAuthClient(
             config=oauth_config,
             proxy=self.proxy_url,
@@ -177,68 +293,158 @@ class AnyAutoRegistrationEngine:
                 "session": oauth_client.session,
             }
 
-        if oauth_client.last_error:
-            self._log(f"Passwordless OAuth 失败: {oauth_client.last_error}")
+        self._last_passwordless_oauth_error = str(getattr(oauth_client, "last_error", "") or "").strip()
+        if self._last_passwordless_oauth_error:
+            self._log(f"Passwordless OAuth 失败: {self._last_passwordless_oauth_error}")
         return None
 
+    @staticmethod
+    def _extract_session_token_from_session(session) -> str:
+        try:
+            cookies = getattr(session, "cookies", None)
+            jar = getattr(cookies, "jar", cookies)
+            iterable = jar.items() if isinstance(jar, dict) else (jar or [])
+            for cookie in iterable:
+                if isinstance(cookie, tuple):
+                    name, value = cookie
+                else:
+                    name = getattr(cookie, "name", "")
+                    value = getattr(cookie, "value", "")
+                if name == "__Secure-next-auth.session-token":
+                    return str(value or "").strip()
+        except Exception:
+            return ""
+        return ""
+
+    @staticmethod
+    def _extract_workspace_id_from_oauth_client(oauth_client: OAuthClient) -> str:
+        try:
+            session_data = oauth_client._decode_oauth_session_cookie()
+        except Exception:
+            return ""
+        workspaces = (session_data or {}).get("workspaces") or []
+        if not workspaces:
+            return ""
+        return str((workspaces[0] or {}).get("id") or "").strip()
+
+    def _build_oauth_success_payload(
+        self,
+        chatgpt_client: ChatGPTClient,
+        oauth_client: OAuthClient,
+        tokens: Dict[str, Any],
+        fallback_account_id: str = "",
+    ) -> Dict[str, Any]:
+        workspace_id = self._extract_workspace_id_from_oauth_client(oauth_client)
+        if workspace_id:
+            self._log(f"OAuth Workspace ID: {workspace_id}")
+        session_token = self._extract_session_token_from_session(oauth_client.session)
+        account_id = self._extract_account_id_from_token(tokens.get("access_token", ""))
+        account_id = account_id or workspace_id or str(fallback_account_id or "").strip()
+        if not account_id:
+            device_prefix = str(getattr(chatgpt_client, "device_id", "") or "")[:8]
+            account_id = f"v2_acct_{device_prefix}" if device_prefix else ""
+        return {
+            "access_token": tokens.get("access_token", ""),
+            "refresh_token": tokens.get("refresh_token", ""),
+            "id_token": tokens.get("id_token", ""),
+            "account_id": account_id,
+            "workspace_id": workspace_id or account_id,
+            "session_token": session_token,
+        }
+
+    def _best_effort_enrich_session_tokens(
+        self,
+        chatgpt_client: ChatGPTClient,
+        email: str,
+        password: str,
+        skymail_adapter: EmailServiceAdapter,
+        oauth_config: Dict[str, Any],
+        fallback_account_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        self._log("Session tokens missing refresh_token, trying OAuth enrichment...")
+        self._last_oauth_enrichment_error = ""
+        oauth_client = OAuthClient(
+            config=oauth_config,
+            proxy=self.proxy_url,
+            verbose=False,
+            browser_mode=self.browser_mode,
+        )
+        oauth_client._log = self._log
+        oauth_client.session = chatgpt_client.session
+        try:
+            tokens = oauth_client.login_and_get_tokens(
+                email,
+                password,
+                chatgpt_client.device_id,
+                chatgpt_client.ua,
+                chatgpt_client.sec_ch_ua,
+                chatgpt_client.impersonate,
+                skymail_adapter,
+            )
+        except Exception as exc:
+            self._last_oauth_enrichment_error = str(exc).strip()
+            self._log(f"OAuth enrichment raised exception, keep session tokens: {exc}")
+            return None
+        if not tokens or not tokens.get("refresh_token"):
+            last_error = str(getattr(oauth_client, "last_error", "") or "refresh_token missing").strip()
+            self._last_oauth_enrichment_error = last_error
+            self._log(f"OAuth enrichment did not return refresh_token, keep session tokens: {last_error}")
+            return None
+        self.session = oauth_client.session or self.session
+        self._last_oauth_enrichment_error = ""
+        self._log("OAuth enrichment succeeded, refresh_token acquired")
+        return self._build_oauth_success_payload(
+            chatgpt_client,
+            oauth_client,
+            tokens,
+            fallback_account_id=fallback_account_id,
+        )
+
     def run(self):
-        """
-        执行 any-auto-register 风格注册流程。
-        返回 dict：包含 result(RegistrationResult 填充所需字段) + 额外上下文。
-        """
+        """执行 any-auto-register 风格注册流程。"""
         last_error = ""
         settings = get_settings()
-        password_len = int(getattr(settings, "registration_default_password_length", DEFAULT_PASSWORD_LENGTH) or DEFAULT_PASSWORD_LENGTH)
+        password_len = int(
+            getattr(settings, "registration_default_password_length", DEFAULT_PASSWORD_LENGTH)
+            or DEFAULT_PASSWORD_LENGTH
+        )
 
-        oauth_config = dict(self.extra_config or {})
-        if not oauth_config:
-            oauth_config = {
-                "oauth_issuer": str(getattr(settings, "openai_auth_url", "") or "https://auth.openai.com"),
-                "oauth_client_id": str(getattr(settings, "openai_client_id", "") or "app_EMoamEEZ73f0CkXaXp7hrann"),
-                "oauth_redirect_uri": str(getattr(settings, "openai_redirect_uri", "") or "http://localhost:1455/auth/callback"),
-            }
+        oauth_config = {
+            "oauth_issuer": str(getattr(settings, "openai_auth_url", "") or "https://auth.openai.com"),
+            "oauth_client_id": str(getattr(settings, "openai_client_id", "") or "app_EMoamEEZ73f0CkXaXp7hrann"),
+            "oauth_redirect_uri": str(getattr(settings, "openai_redirect_uri", "") or "http://localhost:1455/auth/callback"),
+        }
+        oauth_config.update(dict(self.extra_config or {}))
+        adaptive_register_recovery = bool((self.extra_config or {}).get("adaptive_register_recovery"))
 
         for attempt in range(self.max_retries):
             try:
+                self._raise_if_cancelled("任务已取消")
                 if attempt == 0:
                     self._log("=" * 60)
                     self._log("开始注册流程 V2 (Session 复用直取 AccessToken)")
                     self._log(f"请求模式: {self.browser_mode}")
                     self._log("=" * 60)
                 else:
-                    self._log(f"整流程重试 {attempt + 1}/{self.max_retries} ...")
-                    time.sleep(1)
+                    backoff = min(2 ** attempt, 10) + random.uniform(0.5, 2.0)
+                    self._log(f"整流程重试 {attempt + 1}/{self.max_retries}，等待 {backoff:.1f}s ...")
+                    self._sleep_interruptible(backoff)
 
-                # 1. 创建邮箱
-                self.email_info = self.email_service.create_email()
-                raw_email = str((self.email_info or {}).get("email") or "").strip()
-                if not raw_email:
+                normalized_email = self._prepare_email_for_attempt()
+                if not normalized_email:
                     last_error = "创建邮箱失败"
                     return {"success": False, "error_message": last_error}
 
-                normalized_email = raw_email.lower()
-                self.inbox_email = raw_email
-                self.email = normalized_email
-                try:
-                    self.email_info["email"] = normalized_email
-                except Exception:
-                    pass
-
-                if raw_email != normalized_email:
-                    self._log(f"邮箱规范化: {raw_email} -> {normalized_email}")
-
-                # 2. 生成密码 & 用户信息
                 self.password = self.password or self._build_password(password_len)
                 first_name, last_name = generate_random_name()
                 birthdate = generate_random_birthday()
                 self._log(f"邮箱: {normalized_email}, 密码: {self.password}")
                 self._log(f"注册信息: {first_name} {last_name}, 生日: {birthdate}")
 
-                # 3. 邮箱适配器
                 email_id = (self.email_info or {}).get("service_id")
                 skymail_adapter = EmailServiceAdapter(self.email_service, normalized_email, email_id, self._log)
 
-                # 4. 注册状态机
+                self._raise_if_cancelled("任务已取消")
                 chatgpt_client = ChatGPTClient(
                     proxy=self.proxy_url,
                     verbose=False,
@@ -248,12 +454,21 @@ class AnyAutoRegistrationEngine:
 
                 self._log("步骤 1/2: 执行注册状态机...")
                 success, msg = chatgpt_client.register_complete_flow(
-                    normalized_email, self.password, first_name, last_name, birthdate, skymail_adapter
+                    normalized_email,
+                    self.password,
+                    first_name,
+                    last_name,
+                    birthdate,
+                    skymail_adapter,
+                    adaptive_register_recovery=adaptive_register_recovery,
                 )
                 if not success:
                     last_error = f"注册流失败: {msg}"
-                    if attempt < self.max_retries - 1 and self._should_retry(msg):
-                        self._log(f"注册流失败，准备整流程重试: {msg}")
+                    if self._should_retry(msg) and self._schedule_retry(
+                        attempt,
+                        f"注册流失败，准备整流程重试: {msg}",
+                        prefer_same_email=True,
+                    ):
                         continue
                     return {"success": False, "error_message": last_error}
 
@@ -267,11 +482,11 @@ class AnyAutoRegistrationEngine:
                 except Exception:
                     pass
 
-                # 保存会话与设备
                 self.session = chatgpt_client.session
                 self.device_id = chatgpt_client.device_id
 
                 if add_phone_required:
+                    self._raise_if_cancelled("任务已取消")
                     pwdless = self._passwordless_oauth_reauth(
                         chatgpt_client,
                         normalized_email,
@@ -287,8 +502,17 @@ class AnyAutoRegistrationEngine:
                             "id_token": pwdless.get("id_token", ""),
                         }
 
-                # 5. 复用 session 取 token
+                    last_error = self._last_passwordless_oauth_error or "add_phone_required"
+                    if self._schedule_retry(
+                        attempt,
+                        f"检测到 add_phone，按失败处理并更换邮箱重试: {last_error}",
+                        prefer_same_email=False,
+                    ):
+                        continue
+                    return self._build_add_phone_failure_payload(last_error)
+
                 self._log("步骤 2/2: 优先复用注册会话提取 ChatGPT Session / AccessToken...")
+                self._raise_if_cancelled("任务已取消")
                 session_ok, session_result = chatgpt_client.reuse_session_and_get_tokens()
                 if session_ok:
                     self._log("Token 提取完成！")
@@ -297,11 +521,38 @@ class AnyAutoRegistrationEngine:
                         account_id = str(session_result.get("workspace_id", "") or "").strip()
                     if not account_id:
                         account_id = self._extract_account_id_from_token(session_result.get("access_token", ""))
+
+                    merged_tokens: Dict[str, Any] = {}
+                    if not str(session_result.get("refresh_token", "") or "").strip():
+                        enriched_tokens = self._best_effort_enrich_session_tokens(
+                            chatgpt_client,
+                            normalized_email,
+                            self.password or "",
+                            skymail_adapter,
+                            oauth_config,
+                            fallback_account_id=account_id,
+                        )
+                        if enriched_tokens:
+                            merged_tokens = enriched_tokens
+                        elif self._is_phone_required_error(self._last_oauth_enrichment_error):
+                            last_error = self._last_oauth_enrichment_error or "add_phone_required"
+                            if self._schedule_retry(
+                                attempt,
+                                f"检测到 add_phone，按失败处理并更换邮箱重试: {last_error}",
+                                prefer_same_email=False,
+                            ):
+                                continue
+                            return self._build_add_phone_failure_payload(last_error)
+
+                    account_id = account_id or str(merged_tokens.get("account_id", "") or "").strip()
                     workspace_id = str(session_result.get("workspace_id", "") or "").strip() or account_id
+                    workspace_id = workspace_id or str(merged_tokens.get("workspace_id", "") or "").strip()
                     return {
                         "success": True,
-                        "access_token": session_result.get("access_token", ""),
-                        "session_token": session_result.get("session_token", ""),
+                        "access_token": merged_tokens.get("access_token", "") or session_result.get("access_token", ""),
+                        "refresh_token": merged_tokens.get("refresh_token", "") or session_result.get("refresh_token", ""),
+                        "id_token": merged_tokens.get("id_token", "") or session_result.get("id_token", ""),
+                        "session_token": session_result.get("session_token", "") or merged_tokens.get("session_token", ""),
                         "account_id": account_id,
                         "workspace_id": workspace_id,
                         "metadata": {
@@ -310,17 +561,18 @@ class AnyAutoRegistrationEngine:
                             "user_id": session_result.get("user_id", ""),
                             "user": session_result.get("user") or {},
                             "account": session_result.get("account") or {},
+                            "oauth_token_enriched": bool(merged_tokens),
                         },
                     }
 
-                # 6. OAuth 回退
                 self._log(f"复用会话失败，回退到 OAuth 登录补全流程: {session_result}")
                 tokens = None
                 oauth_client = None
                 for oauth_attempt in range(2):
+                    self._raise_if_cancelled("任务已取消")
                     if oauth_attempt > 0:
                         self._log(f"同账号 OAuth 重试 {oauth_attempt + 1}/2 ...")
-                        time.sleep(1)
+                        self._sleep_interruptible(1)
 
                     oauth_client = OAuthClient(
                         config=oauth_config,
@@ -343,62 +595,38 @@ class AnyAutoRegistrationEngine:
                     if tokens and tokens.get("access_token"):
                         break
 
-                    if oauth_client.last_error and "add_phone" in oauth_client.last_error:
+                    if self._is_phone_required_error(getattr(oauth_client, "last_error", "")):
                         break
 
                 if tokens and tokens.get("access_token"):
-                    self._log("OAuth 回退补全成功！")
-                    workspace_id = ""
-                    session_cookie = ""
-                    try:
-                        session_data = oauth_client._decode_oauth_session_cookie()
-                        if session_data:
-                            workspaces = session_data.get("workspaces", [])
-                            if workspaces:
-                                workspace_id = str((workspaces[0] or {}).get("id") or "")
-                                if workspace_id:
-                                    self._log(f"成功萃取 Workspace ID: {workspace_id}")
-                    except Exception:
-                        pass
+                    self._log("OAuth 回退补全成功")
+                    oauth_payload = self._build_oauth_success_payload(
+                        chatgpt_client,
+                        oauth_client,
+                        tokens,
+                    )
+                    return {"success": True, **oauth_payload}
 
-                    try:
-                        for cookie in oauth_client.session.cookies.jar:
-                            if cookie.name == "__Secure-next-auth.session-token":
-                                session_cookie = cookie.value
-                                break
-                    except Exception:
-                        pass
-
-                    account_id = self._extract_account_id_from_token(tokens.get("access_token", "")) or workspace_id
-                    return {
-                        "success": True,
-                        "access_token": tokens.get("access_token", ""),
-                        "refresh_token": tokens.get("refresh_token", ""),
-                        "id_token": tokens.get("id_token", ""),
-                        "account_id": account_id or ("v2_acct_" + chatgpt_client.device_id[:8]),
-                        "workspace_id": workspace_id or account_id,
-                        "session_token": session_cookie,
-                    }
-
-                # 7. 手机号验证需求：按成功返回，但标记为待补全
-                if oauth_client and self._is_phone_required_error(oauth_client.last_error):
-                    self._log("检测到手机号验证需求，按成功返回并标记待补全")
-                    return {
-                        "success": True,
-                        "metadata": {
-                            "phone_verification_required": True,
-                            "token_pending": True,
-                            "oauth_error": oauth_client.last_error,
-                        },
-                    }
+                if oauth_client and self._is_phone_required_error(getattr(oauth_client, "last_error", "")):
+                    last_error = str(getattr(oauth_client, "last_error", "") or "add_phone_required").strip()
+                    if self._schedule_retry(
+                        attempt,
+                        f"检测到 add_phone，按失败处理并更换邮箱重试: {last_error}",
+                        prefer_same_email=False,
+                    ):
+                        continue
+                    return self._build_add_phone_failure_payload(last_error)
 
                 last_error = str(getattr(oauth_client, "last_error", "") or "").strip() or "获取最终 OAuth Tokens 失败"
                 return {"success": False, "error_message": f"账号已创建成功，但 {last_error}"}
 
             except Exception as attempt_error:
                 last_error = str(attempt_error)
-                if attempt < self.max_retries - 1 and self._should_retry(last_error):
-                    self._log(f"本轮出现异常，准备整流程重试: {last_error}")
+                if self._should_retry(last_error) and self._schedule_retry(
+                    attempt,
+                    f"本轮出现异常，准备整流程重试: {last_error}",
+                    prefer_same_email=True,
+                ):
                     continue
                 return {"success": False, "error_message": last_error}
 

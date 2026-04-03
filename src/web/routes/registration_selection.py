@@ -11,7 +11,6 @@ from ...services import EmailServiceFactory, EmailServiceType
 LogCallback = Optional[Callable[[str], None]]
 
 ADDRESS_SELECTION_TYPES = {
-    EmailServiceType.MOE_MAIL,
     EmailServiceType.TEMP_MAIL,
     EmailServiceType.FREEMAIL,
     EmailServiceType.OUTLOOK,
@@ -32,8 +31,10 @@ class RegistrationSelectionRequest:
     random_email_service: bool = False
     random_outlook_account: bool = False
     random_domain: bool = False
+    subdomain_only: bool = False
     selected_email_addresses: Sequence[str] = field(default_factory=list)
     selected_domains: Sequence[str] = field(default_factory=list)
+    skipped_email_addresses: Sequence[str] = field(default_factory=list)
     selection_index: int = 0
 
 
@@ -43,6 +44,10 @@ class ResolvedEmailService:
     config: Dict[str, Any]
     email_service_id: Optional[int]
     service_name: str
+
+
+class RegistrationSelectionExhaustedError(ValueError):
+    """当前任务内可选邮箱地址已被耗尽。"""
 
 
 def normalize_email_service_config(
@@ -86,6 +91,7 @@ def build_service_options(
             "service_name": "Tempmail.lol",
             "supports_random_service": False,
             "supports_random_domain": False,
+            "supports_subdomain_only": False,
             "supports_address_selection": False,
             "supports_random_outlook_account": False,
             "domains": [],
@@ -102,6 +108,7 @@ def build_service_options(
             "service_name": "Outlook",
             "supports_random_service": False,
             "supports_random_domain": False,
+            "supports_subdomain_only": False,
             "supports_address_selection": True,
             "supports_random_outlook_account": True,
             "domains": domains,
@@ -124,14 +131,15 @@ def build_service_options(
                 )
                 try:
                     service = EmailServiceFactory.create(service_type, config, name="默认自定义域名服务")
-                    domains = _dedupe_strings(service.list_domains())
-                    email_addresses = _normalize_email_options(service.list_emails())
+                    domains = _list_service_domains(service) or []
+                    email_addresses = _list_service_emails(service) or []
                     return {
                         "service_type": service_type.value,
                         "service_id": None,
                         "service_name": "默认自定义域名服务",
                         "supports_random_service": False,
                         "supports_random_domain": len(domains) > 1,
+                        "supports_subdomain_only": _contains_subdomain(domains),
                         "supports_address_selection": len(email_addresses) > 0,
                         "supports_random_outlook_account": False,
                         "domains": domains,
@@ -147,6 +155,7 @@ def build_service_options(
             "service_name": service_type.value,
             "supports_random_service": False,
             "supports_random_domain": service_type in DOMAIN_SELECTION_TYPES,
+            "supports_subdomain_only": False,
             "supports_address_selection": service_type in ADDRESS_SELECTION_TYPES,
             "supports_random_outlook_account": False,
             "domains": [],
@@ -162,9 +171,9 @@ def build_service_options(
     try:
         service = EmailServiceFactory.create(actual_type, config, name=selected_service.name)
         if actual_type in DOMAIN_SELECTION_TYPES:
-            domains = _dedupe_strings(service.list_domains())
+            domains = _list_service_domains(service) or []
         if actual_type in ADDRESS_SELECTION_TYPES:
-            email_addresses = _normalize_email_options(service.list_emails())
+            email_addresses = _list_service_emails(service) or []
     except Exception as exc:
         notes.append(f"读取服务能力失败: {exc}")
 
@@ -174,6 +183,7 @@ def build_service_options(
         "service_name": selected_service.name,
         "supports_random_service": _supports_random_service(db, actual_type),
         "supports_random_domain": actual_type in DOMAIN_SELECTION_TYPES and len(domains) > 1,
+        "supports_subdomain_only": actual_type in DOMAIN_SELECTION_TYPES and _contains_subdomain(domains),
         "supports_address_selection": actual_type in ADDRESS_SELECTION_TYPES and len(email_addresses) > 0,
         "supports_random_outlook_account": False,
         "domains": domains,
@@ -223,6 +233,8 @@ def resolve_email_service_for_registration(
         service_type=service_type,
         requested_service_id=requested_service_id,
         random_email_service=selection.random_email_service,
+        proxy_url=proxy_url,
+        selection=selection,
     )
     if db_service:
         actual_type = EmailServiceType(db_service.service_type)
@@ -306,6 +318,10 @@ def _resolve_outlook_service(
         else:
             raise ValueError("所选 Outlook 账号不可用")
 
+    candidates = _exclude_skipped_addresses(candidates, selection.skipped_email_addresses)
+    if selection.skipped_email_addresses and not candidates:
+        raise RegistrationSelectionExhaustedError("当前可选邮箱地址已耗尽")
+
     if not candidates:
         raise ValueError("没有可用的 Outlook 账号")
 
@@ -340,8 +356,11 @@ def _apply_domain_and_address_selection(
     selection: RegistrationSelectionRequest,
     log_callback: LogCallback,
 ) -> Dict[str, Any]:
+    if selection.subdomain_only and service_type not in DOMAIN_SELECTION_TYPES:
+        raise ValueError("当前邮箱服务不支持仅子域名筛选")
+
     if not (
-        (service_type in DOMAIN_SELECTION_TYPES and (selection.random_domain or selection.selected_domains))
+        (service_type in DOMAIN_SELECTION_TYPES and (selection.random_domain or selection.selected_domains or selection.subdomain_only))
         or (service_type in ADDRESS_SELECTION_TYPES and selection.selected_email_addresses)
     ):
         return config
@@ -364,8 +383,15 @@ def _apply_domain_selection(
     selection: RegistrationSelectionRequest,
     log_callback: LogCallback,
 ) -> Dict[str, Any]:
-    available_domains = _dedupe_strings(service.list_domains())
+    available_domains = _list_service_domains(service)
+    if available_domains is None:
+        if selection.subdomain_only:
+            raise ValueError("当前邮箱服务不支持仅子域名筛选")
+        _log(log_callback, "当前邮箱服务不支持读取域名列表，继续使用默认创建逻辑")
+        return config
     if not available_domains:
+        if selection.subdomain_only:
+            raise ValueError("当前邮箱服务没有可用的子域名")
         return config
 
     selected_domains = _ordered_matches(
@@ -377,7 +403,15 @@ def _apply_domain_selection(
     if selection.selected_domains and not selected_domains:
         raise ValueError("所选域名在当前邮箱服务中不可用")
 
-    if not selection.random_domain and not selection.selected_domains:
+    if selection.subdomain_only:
+        domain_pool = _filter_subdomain_domains(domain_pool)
+        if selection.selected_domains and not domain_pool:
+            raise ValueError("所选域名中没有可用的子域名")
+        if not domain_pool:
+            raise ValueError("当前邮箱服务没有可用的子域名")
+        _log(log_callback, f"仅子域名已生效，本次候选域名池: {', '.join(f'@{item}' for item in domain_pool)}")
+
+    if not selection.random_domain and not selection.selected_domains and not selection.subdomain_only:
         return config
 
     chosen = _pick_entry(
@@ -399,13 +433,19 @@ def _apply_domain_selection(
 
 
 def _apply_email_address_selection(service, config: Dict[str, Any], selection: RegistrationSelectionRequest, log_callback: LogCallback) -> Dict[str, Any]:
-    available_addresses = _normalize_email_options(service.list_emails())
+    available_addresses = _list_service_emails(service)
+    if available_addresses is None:
+        _log(log_callback, "当前邮箱服务不支持读取邮箱地址列表，继续使用默认创建逻辑")
+        return config
     address_pool = _ordered_matches(
         available_addresses,
         selection.selected_email_addresses,
         value_getter=lambda item: item["email"],
     )
+    address_pool = _exclude_skipped_addresses(address_pool, selection.skipped_email_addresses)
     if not address_pool:
+        if selection.skipped_email_addresses:
+            raise RegistrationSelectionExhaustedError("当前可选邮箱地址已耗尽")
         raise ValueError("所选邮箱地址在当前邮箱服务中不可用")
 
     chosen = _pick_entry(
@@ -444,7 +484,14 @@ def _find_options_service(db, service_type: EmailServiceType, service_id: Option
     return service
 
 
-def _select_database_service(db, service_type: EmailServiceType, requested_service_id: Optional[int], random_email_service: bool) -> Optional[EmailServiceModel]:
+def _select_database_service(
+    db,
+    service_type: EmailServiceType,
+    requested_service_id: Optional[int],
+    random_email_service: bool,
+    proxy_url: Optional[str] = None,
+    selection: Optional[RegistrationSelectionRequest] = None,
+) -> Optional[EmailServiceModel]:
     if requested_service_id and not random_email_service:
         service = (
             db.query(EmailServiceModel)
@@ -469,6 +516,14 @@ def _select_database_service(db, service_type: EmailServiceType, requested_servi
     )
     if not services:
         return None
+    if random_email_service and selection and selection.subdomain_only:
+        eligible_services = [
+            service for service in services
+            if _service_supports_subdomain(service_type, service, proxy_url)
+        ]
+        if not eligible_services:
+            raise ValueError("当前邮箱服务没有可用的子域名")
+        services = eligible_services
     return random.choice(services) if random_email_service else services[0]
 
 
@@ -541,6 +596,63 @@ def _normalize_email_options(items: Sequence[Dict[str, Any]]) -> List[Dict[str, 
     return result
 
 
+def _normalize_domain_value(value: Any) -> str:
+    return str(value or "").strip().lower().rstrip(".").lstrip("@")
+
+
+def _is_subdomain_domain(value: Any) -> bool:
+    normalized = _normalize_domain_value(value)
+    if not normalized:
+        return False
+    return len([part for part in normalized.split(".") if part]) >= 3
+
+
+def _contains_subdomain(domains: Sequence[str]) -> bool:
+    return any(_is_subdomain_domain(domain) for domain in domains or [])
+
+
+def _filter_subdomain_domains(domains: Sequence[str]) -> List[str]:
+    return [domain for domain in domains or [] if _is_subdomain_domain(domain)]
+
+
+def _exclude_skipped_addresses(items: Sequence[Any], skipped_addresses: Sequence[str]) -> List[Any]:
+    skipped_set = {
+        str(item or "").strip().lower()
+        for item in skipped_addresses or []
+        if str(item or "").strip()
+    }
+    if not skipped_set:
+        return list(items)
+
+    result: List[Any] = []
+    for item in items or []:
+        email = item["email"] if isinstance(item, dict) else str(item or "")
+        if str(email or "").strip().lower() in skipped_set:
+            continue
+        result.append(item)
+    return result
+
+
+def _list_service_domains(service) -> Optional[List[str]]:
+    method = getattr(service, "list_domains", None)
+    if not callable(method):
+        return None
+    try:
+        return _dedupe_strings(method())
+    except NotImplementedError:
+        return None
+
+
+def _list_service_emails(service) -> Optional[List[Dict[str, Any]]]:
+    method = getattr(service, "list_emails", None)
+    if not callable(method):
+        return None
+    try:
+        return _normalize_email_options(method())
+    except NotImplementedError:
+        return None
+
+
 def _supports_random_service(db, service_type: EmailServiceType) -> bool:
     if service_type == EmailServiceType.OUTLOOK:
         return False
@@ -559,15 +671,28 @@ def _dedupe_strings(items: Sequence[Any]) -> List[str]:
     seen = set()
     result: List[str] = []
     for item in items:
-        value = str(item or "").strip().lstrip("@")
+        value = _normalize_domain_value(item)
         if not value:
             continue
-        lowered = value.lower()
-        if lowered in seen:
+        if value in seen:
             continue
-        seen.add(lowered)
+        seen.add(value)
         result.append(value)
     return result[:ENUMERATION_LIMIT]
+
+
+def _service_supports_subdomain(
+    service_type: EmailServiceType,
+    db_service: EmailServiceModel,
+    proxy_url: Optional[str],
+) -> bool:
+    try:
+        config = normalize_email_service_config(service_type, db_service.config, proxy_url)
+        service = EmailServiceFactory.create(service_type, config, name=db_service.name)
+        domains = _list_service_domains(service) or []
+        return _contains_subdomain(domains)
+    except Exception:
+        return False
 
 
 def _pick_entry(items: Sequence[Any], selection_index: int = 0, randomize: bool = False, cycle: bool = False):

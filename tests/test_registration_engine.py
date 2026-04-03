@@ -4,7 +4,7 @@ import json
 from src.config.constants import EmailServiceType, OPENAI_API_ENDPOINTS, OPENAI_PAGE_TYPES
 from src.core.http_client import OpenAIHTTPClient
 from src.core.openai.oauth import OAuthStart
-from src.core.register import RegistrationEngine
+from src.core.register import RegistrationEngine, RegistrationResult
 from src.services.base import BaseEmailService
 
 
@@ -294,3 +294,51 @@ def test_existing_account_login_uses_auto_sent_otp_without_manual_send():
     assert len(email_service.otp_requests) == 1
     assert email_service.otp_requests[0]["otp_sent_at"] is not None
     assert result.metadata["token_acquired_via_relogin"] is False
+
+
+def test_sync_add_phone_result_sets_error_code():
+    email_service = FakeEmailService(["123456"])
+    engine = RegistrationEngine(email_service)
+    result = engine._sync_add_phone_result(
+        RegistrationResult(
+            success=False,
+            email="tester@example.com",
+            error_message="当前账号进入 add_phone 页面，需要补充手机号后才能继续授权",
+        )
+    )
+
+    assert result.error_code == "add_phone_required"
+    assert "add_phone" in result.error_message
+
+
+def test_register_password_uses_browser_like_headers_and_datadog_trace():
+    session = QueueSession([
+        ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
+    ])
+
+    email_service = FakeEmailService(["123456"])
+    engine = RegistrationEngine(email_service)
+    engine.session = session
+    engine.email = "tester@example.com"
+
+    success, password = engine._register_password("did-1", "sentinel-1")
+
+    assert success is True
+    assert password
+
+    request = session.calls[0]
+    headers = request["kwargs"]["headers"]
+    payload = request["kwargs"]["json"]
+
+    assert payload == {
+        "username": "tester@example.com",
+        "password": password,
+    }
+    assert headers["Origin"] == "https://auth.openai.com"
+    assert headers["Referer"] == "https://auth.openai.com/create-account/password"
+    assert headers["Content-Type"] == "application/json"
+    assert headers["Sec-Fetch-Site"] == "same-origin"
+    assert headers["Accept-Language"] == "en-US,en;q=0.9"
+    assert "sec-ch-ua" in headers
+    assert "traceparent" in headers
+    assert "x-datadog-trace-id" in headers

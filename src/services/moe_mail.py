@@ -187,6 +187,40 @@ class MeoMailEmailService(BaseEmailService):
             logger.warning(f"获取配置失败: {e}")
             return {}
 
+    def list_domains(self) -> List[str]:
+        """列出当前可用的邮箱域名后缀。"""
+        domains: List[str] = []
+
+        default_domain = str(self.config.get("default_domain") or "").strip().lstrip("@")
+        if default_domain:
+            domains.append(default_domain)
+
+        system_config = self.get_config()
+        raw_domains = system_config.get("emailDomains")
+
+        if isinstance(raw_domains, str):
+            domains.extend(raw_domains.split(","))
+        elif isinstance(raw_domains, list):
+            for item in raw_domains:
+                if isinstance(item, dict):
+                    domains.append(str(item.get("domain") or item.get("name") or "").strip())
+                else:
+                    domains.append(str(item).strip())
+
+        normalized: List[str] = []
+        seen = set()
+        for domain in domains:
+            value = str(domain or "").strip().lstrip("@")
+            if not value:
+                continue
+            lowered = value.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            normalized.append(value)
+
+        return normalized
+
     def create_email(self, config: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         创建临时邮箱

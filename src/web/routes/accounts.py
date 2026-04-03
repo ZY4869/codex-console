@@ -1,4 +1,4 @@
-"""
+﻿"""
 账号管理 API 路由
 """
 import io
@@ -23,10 +23,15 @@ from ...config.settings import get_settings
 from ...core.openai.overview import fetch_codex_overview, AccountDeactivatedError
 from ...core.openai.token_refresh import refresh_account_token as do_refresh
 from ...core.openai.token_refresh import validate_account_token as do_validate
-from ...core.upload.cpa_upload import generate_token_json, batch_upload_to_cpa, upload_to_cpa
+from ...core.upload.cpa_upload import generate_token_json, batch_upload_to_cpa
 from ...core.upload.team_manager_upload import upload_to_team_manager, batch_upload_to_team_manager
-from ...core.upload.sub2api_upload import batch_upload_to_sub2api, upload_to_sub2api
+from ...core.upload.sub2api_upload import batch_upload_to_sub2api, prepare_sub2api_export_payload
 from ...core.upload.new_api_upload import batch_upload_to_new_api, upload_to_new_api
+from ...core.upload.platform_upload_dedupe import (
+    PLATFORM_DUPLICATE_REASON,
+    load_platform_upload_record,
+    save_platform_upload_record,
+)
 
 from ...core.dynamic_proxy import get_proxy_url_for_task
 from ...core.timezone_utils import utcnow_naive
@@ -137,6 +142,7 @@ class AccountResponse(BaseModel):
     id: int
     email: str
     password: Optional[str] = None
+    remark: Optional[str] = None
     client_id: Optional[str] = None
     email_service: str
     account_id: Optional[str] = None
@@ -170,6 +176,7 @@ class AccountUpdateRequest(BaseModel):
     metadata: Optional[dict] = None
     cookies: Optional[str] = None  # 完整 cookie 字符串，用于支付请求
     session_token: Optional[str] = None
+    remark: Optional[str] = None
 
 
 class ManualAccountCreateRequest(BaseModel):
@@ -186,6 +193,7 @@ class ManualAccountCreateRequest(BaseModel):
     id_token: Optional[str] = None
     session_token: Optional[str] = None
     cookies: Optional[str] = None
+    remark: Optional[str] = None
     proxy_used: Optional[str] = None
     source: Optional[str] = "manual"
     subscription_type: Optional[str] = None
@@ -206,6 +214,7 @@ class AccountImportItem(BaseModel):
     id_token: Optional[str] = None
     session_token: Optional[str] = None
     cookies: Optional[str] = None
+    remark: Optional[str] = None
     proxy_used: Optional[str] = None
     source: Optional[str] = "import"
     subscription_type: Optional[str] = None
@@ -296,6 +305,7 @@ def account_to_response(account: Account) -> AccountResponse:
         id=account.id,
         email=account.email,
         password=account.password,
+        remark=account.remark,
         client_id=account.client_id,
         email_service=account.email_service,
         account_id=account.account_id,
@@ -721,6 +731,7 @@ async def create_manual_account(request: ManualAccountCreateRequest):
                 id_token=request.id_token,
                 session_token=request.session_token,
                 cookies=request.cookies,
+                remark=request.remark.strip() if request.remark is not None else None,
                 proxy_used=request.proxy_used,
                 extra_data=request.metadata or {},
             )
@@ -884,6 +895,7 @@ async def import_accounts(request: ImportAccountsRequest):
                         "id_token": _safe_text(id_token),
                         "session_token": _safe_text(session_token),
                         "cookies": item.cookies if item.cookies is not None else None,
+                        "remark": item.remark.strip() if item.remark is not None else None,
                         "proxy_used": _safe_text(item.proxy_used),
                         "source": source,
                         "extra_data": metadata,
@@ -912,6 +924,7 @@ async def import_accounts(request: ImportAccountsRequest):
                     refresh_token=_safe_text(refresh_token),
                     id_token=_safe_text(id_token),
                     cookies=item.cookies,
+                    remark=item.remark.strip() if item.remark is not None else None,
                     proxy_used=_safe_text(item.proxy_used),
                     extra_data=metadata,
                     status=status,
@@ -1439,9 +1452,9 @@ async def update_account(account_id: int, request: AccountUpdateRequest):
             update_data["status"] = request.status
 
         if request.metadata:
-            current_metadata = account.metadata or {}
+            current_metadata = account.extra_data or {}
             current_metadata.update(request.metadata)
-            update_data["metadata"] = current_metadata
+            update_data["extra_data"] = current_metadata
 
         if request.cookies is not None:
             # 留空则清空，非空则更新
@@ -1451,6 +1464,9 @@ async def update_account(account_id: int, request: AccountUpdateRequest):
             # 留空则清空，非空则更新
             update_data["session_token"] = request.session_token or None
             update_data["last_refresh"] = utcnow_naive()
+
+        if request.remark is not None:
+            update_data["remark"] = request.remark.strip()
 
         account = crud.update_account(db, account_id, **update_data)
         return account_to_response(account)
@@ -1538,6 +1554,7 @@ class BatchExportRequest(BaseModel):
     status_filter: Optional[str] = None
     email_service_filter: Optional[str] = None
     search_filter: Optional[str] = None
+    service_id: Optional[int] = None
 
 
 @router.post("/export/json")
@@ -1642,53 +1659,18 @@ async def export_accounts_csv(request: BatchExportRequest):
 @router.post("/export/sub2api")
 async def export_accounts_sub2api(request: BatchExportRequest):
     """导出账号为 Sub2Api 格式（所有选中账号合并到一个 JSON 的 accounts 数组中）"""
-
-    def make_account_entry(acc) -> dict:
-        expires_at = int(acc.expires_at.timestamp()) if acc.expires_at else 0
-        return {
-            "name": acc.email,
-            "platform": "openai",
-            "type": "oauth",
-            "credentials": {
-                "access_token": acc.access_token or "",
-                "chatgpt_account_id": acc.account_id or "",
-                "chatgpt_user_id": "",
-                "client_id": acc.client_id or "",
-                "expires_at": expires_at,
-                "expires_in": 863999,
-                "model_mapping": {
-                    "gpt-5.1": "gpt-5.1",
-                    "gpt-5.1-codex": "gpt-5.1-codex",
-                    "gpt-5.1-codex-max": "gpt-5.1-codex-max",
-                    "gpt-5.1-codex-mini": "gpt-5.1-codex-mini",
-                    "gpt-5.2": "gpt-5.2",
-                    "gpt-5.2-codex": "gpt-5.2-codex",
-                    "gpt-5.3": "gpt-5.3",
-                    "gpt-5.3-codex": "gpt-5.3-codex",
-                    "gpt-5.4": "gpt-5.4"
-                },
-                "organization_id": acc.workspace_id or "",
-                "refresh_token": acc.refresh_token or ""
-            },
-            "extra": {},
-            "concurrency": 10,
-            "priority": 1,
-            "rate_multiplier": 1,
-            "auto_pause_on_expired": True
-        }
-
     with get_db() as db:
         ids = resolve_account_ids(
             db, request.ids, request.select_all,
             request.status_filter, request.email_service_filter, request.search_filter
         )
         accounts = db.query(Account).filter(Account.id.in_(ids)).all()
+        try:
+            _, payload = prepare_sub2api_export_payload(db, accounts, service_id=request.service_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        payload = {
-            "proxies": [],
-            "accounts": [make_account_entry(acc) for acc in accounts]
-        }
         content = json.dumps(payload, ensure_ascii=False, indent=2)
 
         if len(accounts) == 1:
@@ -2139,7 +2121,14 @@ async def batch_upload_accounts_to_cpa(request: BatchCPAUploadRequest):
             request.status_filter, request.email_service_filter, request.search_filter
         )
 
-    results = batch_upload_to_cpa(ids, proxy, api_url=cpa_api_url, api_token=cpa_api_token)
+    results = batch_upload_to_cpa(
+        ids,
+        proxy,
+        api_url=cpa_api_url,
+        api_token=cpa_api_token,
+        service_id=request.cpa_service_id,
+        dedupe=True,
+    )
     return results
 
 
@@ -2166,25 +2155,15 @@ async def upload_account_to_cpa(account_id: int, request: Optional[CPAUploadRequ
         if not account:
             raise HTTPException(status_code=404, detail="账号不存在")
 
-        if not account.access_token:
-            return {
-                "success": False,
-                "error": "账号缺少 Token，无法上传"
-            }
-
-        # 生成 Token JSON
-        token_data = generate_token_json(account)
-
-        # 上传
-        success, message = upload_to_cpa(token_data, proxy, api_url=cpa_api_url, api_token=cpa_api_token)
-
-        if success:
-            account.cpa_uploaded = True
-            account.cpa_uploaded_at = utcnow_naive()
-            db.commit()
-            return {"success": True, "message": message}
-        else:
-            return {"success": False, "error": message}
+    results = batch_upload_to_cpa(
+        [account_id],
+        proxy,
+        api_url=cpa_api_url,
+        api_token=cpa_api_token,
+        service_id=cpa_service_id,
+        dedupe=True,
+    )
+    return build_single_upload_response(results)
 
 
 class Sub2ApiUploadRequest(BaseModel):
@@ -2213,6 +2192,7 @@ async def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
     # 解析指定的 Sub2API 服务
     api_url = None
     api_key = None
+    svc = None
     if request.service_id:
         with get_db() as db:
             svc = crud.get_sub2api_service_by_id(db, request.service_id)
@@ -2240,8 +2220,36 @@ async def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
         ids, api_url, api_key,
         concurrency=request.concurrency,
         priority=request.priority,
+        service_id=request.service_id or (svc.id if svc else None),
+        dedupe=True,
     )
     return results
+
+
+def build_single_upload_response(results: dict) -> dict:
+    detail = next(iter(results.get("details") or []), {})
+    failed_count = int(results.get("failed_count") or 0)
+    skipped_count = int(results.get("skipped_count") or 0)
+    success_count = int(results.get("success_count") or 0)
+
+    if failed_count > 0:
+        return {"success": False, "error": detail.get("error") or "上传失败"}
+
+    if skipped_count > 0 and success_count == 0:
+        if detail.get("reason_code") == PLATFORM_DUPLICATE_REASON:
+            response = {
+                "success": True,
+                "skipped": True,
+                "message": detail.get("message") or "平台已存在，已跳过",
+            }
+            if detail.get("reason_code"):
+                response["reason_code"] = detail.get("reason_code")
+            if detail.get("duplicate_source"):
+                response["duplicate_source"] = detail.get("duplicate_source")
+            return response
+        return {"success": False, "error": detail.get("error") or detail.get("message") or "上传已跳过"}
+
+    return {"success": True, "message": detail.get("message") or "上传成功"}
 
 
 @router.post("/{account_id}/upload-sub2api")
@@ -2254,6 +2262,7 @@ async def upload_account_to_sub2api(account_id: int, request: Optional[Sub2ApiUp
 
     api_url = None
     api_key = None
+    svc = None
     if service_id:
         with get_db() as db:
             svc = crud.get_sub2api_service_by_id(db, service_id)
@@ -2275,18 +2284,17 @@ async def upload_account_to_sub2api(account_id: int, request: Optional[Sub2ApiUp
         account = crud.get_account_by_id(db, account_id)
         if not account:
             raise HTTPException(status_code=404, detail="账号不存在")
-        if not account.access_token:
-            return {"success": False, "error": "账号缺少 Token，无法上传"}
 
-        success, message = upload_to_sub2api(
-            [account], api_url, api_key,
-            concurrency=concurrency, priority=priority,
-            target_type="sub2api"
-        )
-        if success:
-            return {"success": True, "message": message}
-        else:
-            return {"success": False, "error": message}
+    results = batch_upload_to_sub2api(
+        [account_id],
+        api_url,
+        api_key,
+        concurrency=concurrency,
+        priority=priority,
+        service_id=service_id or (svc.id if svc else None),
+        dedupe=True,
+    )
+    return build_single_upload_response(results)
 
 
 class NewApiUploadRequest(BaseModel):
@@ -2380,6 +2388,7 @@ async def batch_upload_accounts_to_tm(request: BatchUploadTMRequest):
     """批量上传账号到 Team Manager"""
 
     with get_db() as db:
+        svc = None
         if request.service_id:
             svc = crud.get_tm_service_by_id(db, request.service_id)
         else:
@@ -2397,7 +2406,13 @@ async def batch_upload_accounts_to_tm(request: BatchUploadTMRequest):
             request.status_filter, request.email_service_filter, request.search_filter
         )
 
-    results = batch_upload_to_team_manager(ids, api_url, api_key)
+    results = batch_upload_to_team_manager(
+        ids,
+        api_url,
+        api_key,
+        service_id=request.service_id or (svc.id if svc else None),
+        dedupe=True,
+    )
     return results
 
 
@@ -2408,6 +2423,7 @@ async def upload_account_to_tm(account_id: int, request: Optional[UploadTMReques
     service_id = request.service_id if request else None
 
     with get_db() as db:
+        svc = None
         if service_id:
             svc = crud.get_tm_service_by_id(db, service_id)
         else:
@@ -2423,9 +2439,37 @@ async def upload_account_to_tm(account_id: int, request: Optional[UploadTMReques
         account = crud.get_account_by_id(db, account_id)
         if not account:
             raise HTTPException(status_code=404, detail="账号不存在")
-        success, message = upload_to_team_manager(account, api_url, api_key)
+        if not account.access_token:
+            return {"success": False, "error": "账号缺少 access_token"}
 
-    return {"success": success, "message": message}
+        resolved_service_id = service_id or (svc.id if svc else None)
+        record = load_platform_upload_record(
+            account,
+            "tm",
+            service_id=resolved_service_id,
+            api_url=api_url,
+        )
+        if record:
+            return {
+                "success": True,
+                "skipped": True,
+                "message": "Team Manager 已存在本地上传记录，已跳过",
+                "reason_code": PLATFORM_DUPLICATE_REASON,
+                "duplicate_source": "local_record",
+            }
+
+        success, message = upload_to_team_manager(account, api_url, api_key)
+        if success:
+            save_platform_upload_record(
+                db,
+                account,
+                "tm",
+                service_id=resolved_service_id,
+                api_url=api_url,
+            )
+            return {"success": True, "message": message}
+
+    return {"success": False, "error": message}
 
 
 # ============== Inbox Code ==============
