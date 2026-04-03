@@ -85,7 +85,7 @@ class AnyAutoRegistrationEngine:
         self._last_passwordless_oauth_error = ""
         self._last_oauth_enrichment_error = ""
 
-    def _log(self, message: str):
+    def _log(self, message: str, level: str = "info"):
         if self.callback_logger:
             self.callback_logger(message)
 
@@ -408,6 +408,13 @@ class AnyAutoRegistrationEngine:
             getattr(settings, "registration_default_password_length", DEFAULT_PASSWORD_LENGTH)
             or DEFAULT_PASSWORD_LENGTH
         )
+        configured_same_email_retry_limit = (self.extra_config or {}).get(
+            "same_email_retry_limit",
+            getattr(settings, "registration_same_email_retry_limit", self.same_email_retry_limit),
+        )
+        self.same_email_retry_limit = max(1, int(configured_same_email_retry_limit or 1))
+        # Keep the inner flow budget large enough to fully honor same-email retries.
+        self.max_retries = max(self.max_retries, self.same_email_retry_limit)
 
         oauth_config = {
             "oauth_issuer": str(getattr(settings, "openai_auth_url", "") or "https://auth.openai.com"),

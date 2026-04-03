@@ -632,6 +632,22 @@ user:pass@127.0.0.1:7890
                                     <label for="password-length">密码长度</label>
                                     <input type="number" id="password-length" name="default_password_length" value="12" min="8" max="32">
                                 </div>
+
+                                <div class="form-group">
+                                    <label for="same-email-retry-limit">同一邮箱 400 重试次数</label>
+                                    <input type="number" id="same-email-retry-limit" name="same_email_retry_limit" value="4" min="1" max="20">
+                                    <span class="hint">仅在命中 `400 - Failed to create account. Please try again.` 这类通用 400 时生效。达到次数后会放弃当前邮箱，切换新邮箱继续注册。</span>
+                                </div>
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label style="display:flex;gap:8px;align-items:center;cursor:pointer;">
+                                        <input type="checkbox" id="email-prefix-alnum-only" name="email_prefix_alnum_only" checked>
+                                        <span>创建邮箱前缀仅允许字母和数字</span>
+                                    </label>
+                                    <span class="hint">启用后，创建型邮箱服务会在请求前清洗前缀，并在返回邮箱地址时拦截带特殊符号前缀的结果。</span>
+                                </div>
                             </div>
 
                             <div class="form-row">

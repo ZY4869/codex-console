@@ -409,6 +409,8 @@ async function loadSettings() {
         document.getElementById('max-retries').value = data.registration?.max_retries || 3;
         document.getElementById('timeout').value = data.registration?.timeout || 120;
         document.getElementById('password-length').value = data.registration?.default_password_length || 12;
+        document.getElementById('same-email-retry-limit').value = data.registration?.same_email_retry_limit || 4;
+        document.getElementById('email-prefix-alnum-only').checked = data.registration?.email_prefix_alnum_only !== false;
         const entryFlowRaw = String(data.registration?.entry_flow || 'native').toLowerCase();
         const entryFlow = entryFlowRaw === 'abcard' ? 'abcard' : 'native';
         document.getElementById('registration-entry-flow').value = entryFlow;
@@ -568,6 +570,8 @@ async function handleSaveRegistration(e) {
         max_retries: parseInt(document.getElementById('max-retries').value),
         timeout: parseInt(document.getElementById('timeout').value),
         default_password_length: parseInt(document.getElementById('password-length').value),
+        same_email_retry_limit: parseInt(document.getElementById('same-email-retry-limit').value),
+        email_prefix_alnum_only: document.getElementById('email-prefix-alnum-only').checked,
         entry_flow: document.getElementById('registration-entry-flow').value || 'native',
         sleep_min: parseInt(document.getElementById('sleep-min').value),
         sleep_max: parseInt(document.getElementById('sleep-max').value),

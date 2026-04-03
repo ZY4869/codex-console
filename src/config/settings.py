@@ -297,6 +297,18 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         category=SettingCategory.REGISTRATION,
         description="默认密码长度"
     ),
+    "registration_same_email_retry_limit": SettingDefinition(
+        db_key="registration.same_email_retry_limit",
+        default_value=4,
+        category=SettingCategory.REGISTRATION,
+        description="通用 400 错误时同一邮箱允许连续失败次数"
+    ),
+    "registration_email_prefix_alnum_only": SettingDefinition(
+        db_key="registration.email_prefix_alnum_only",
+        default_value=True,
+        category=SettingCategory.REGISTRATION,
+        description="创建邮箱时强制邮箱前缀仅允许字母和数字"
+    ),
     "registration_sleep_min": SettingDefinition(
         db_key="registration.sleep_min",
         default_value=5,
@@ -670,6 +682,8 @@ SETTING_TYPES: Dict[str, Type] = {
     "registration_max_retries": int,
     "registration_timeout": int,
     "registration_default_password_length": int,
+    "registration_same_email_retry_limit": int,
+    "registration_email_prefix_alnum_only": bool,
     "registration_sleep_min": int,
     "registration_sleep_max": int,
     "registration_entry_flow": str,
@@ -963,6 +977,8 @@ class Settings(BaseModel):
     registration_max_retries: int = 3
     registration_timeout: int = 120
     registration_default_password_length: int = 12
+    registration_same_email_retry_limit: int = 4
+    registration_email_prefix_alnum_only: bool = True
     registration_sleep_min: int = 5
     registration_sleep_max: int = 30
     registration_entry_flow: str = "native"

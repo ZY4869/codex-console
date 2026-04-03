@@ -11,6 +11,8 @@ class DummySettings:
     registration_max_retries = 3
     registration_timeout = 120
     registration_default_password_length = 12
+    registration_same_email_retry_limit = 4
+    registration_email_prefix_alnum_only = True
     registration_sleep_min = 5
     registration_sleep_max = 30
     registration_entry_flow = "abcard"
@@ -33,6 +35,8 @@ def test_get_registration_settings_includes_auto_fields(monkeypatch):
     result = asyncio.run(settings_routes.get_registration_settings())
 
     assert result["entry_flow"] == "abcard"
+    assert result["same_email_retry_limit"] == 4
+    assert result["email_prefix_alnum_only"] is True
     assert result["auto_enabled"] is True
     assert result["auto_check_interval"] == 90
     assert result["auto_min_ready_auth_files"] == 3
@@ -97,6 +101,8 @@ def test_update_registration_settings_persists_auto_fields(monkeypatch):
         max_retries=4,
         timeout=180,
         default_password_length=16,
+        same_email_retry_limit=6,
+        email_prefix_alnum_only=False,
         sleep_min=7,
         sleep_max=15,
         entry_flow="abcard",
@@ -119,6 +125,8 @@ def test_update_registration_settings_persists_auto_fields(monkeypatch):
     assert len(update_calls) == 1
     payload = update_calls[0]
     assert payload["registration_entry_flow"] == "abcard"
+    assert payload["registration_same_email_retry_limit"] == 6
+    assert payload["registration_email_prefix_alnum_only"] is False
     assert payload["registration_auto_enabled"] is True
     assert payload["registration_auto_check_interval"] == 120
     assert payload["registration_auto_min_ready_auth_files"] == 5

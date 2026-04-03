@@ -53,6 +53,7 @@ def _patch_common_dependencies(monkeypatch, chatgpt_client_cls, oauth_client_cls
         "get_settings",
         lambda: SimpleNamespace(
             registration_default_password_length=12,
+            registration_same_email_retry_limit=4,
             openai_auth_url="https://auth.openai.com/oauth/authorize",
             openai_client_id="client-id",
             openai_redirect_uri="http://localhost:1455/auth/callback",
@@ -215,3 +216,108 @@ def test_add_phone_in_oauth_enrichment_switches_to_new_email(monkeypatch):
     assert FakeOAuthClient.login_calls == 2
     assert FakeChatGPTClient.register_emails == ["first@example.com", "second@example.com"]
     assert any("检测到 add_phone，按失败处理并更换邮箱重试" in line for line in logs)
+
+
+def test_retry_limit_from_settings_switches_to_new_email_earlier(monkeypatch):
+    class FakeChatGPTClient(BaseFakeChatGPTClient):
+        register_emails = []
+
+        def register_complete_flow(self, email, *args, **kwargs):
+            self.__class__.register_emails.append(email)
+            if len(self.__class__.register_emails) < 3:
+                return False, "HTTP 400: Failed to create account. Please try again."
+            return True, "ok"
+
+        def reuse_session_and_get_tokens(self):
+            return True, {
+                "access_token": "session-access-token",
+                "refresh_token": "session-refresh-token",
+                "session_token": "session-token",
+                "account_id": "acct-session",
+                "workspace_id": "ws-session",
+                "auth_provider": "openai",
+                "expires": "2099-01-01T00:00:00Z",
+                "user_id": "user-session",
+                "user": {"id": "user-session"},
+                "account": {"id": "acct-session"},
+            }
+
+    _patch_common_dependencies(monkeypatch, FakeChatGPTClient, UnusedOAuthClient)
+    monkeypatch.setattr(
+        register_flow_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            registration_default_password_length=12,
+            registration_same_email_retry_limit=2,
+            openai_auth_url="https://auth.openai.com/oauth/authorize",
+            openai_client_id="client-id",
+            openai_redirect_uri="http://localhost:1455/auth/callback",
+        ),
+    )
+
+    service = RecordingEmailService(
+        [
+            {"email": "first@example.com", "service_id": "svc-1"},
+            {"email": "second@example.com", "service_id": "svc-2"},
+        ]
+    )
+
+    result = AnyAutoRegistrationEngine(
+        email_service=service,
+        max_retries=3,
+        callback_logger=lambda _msg: None,
+    ).run()
+
+    assert result["success"] is True
+    assert service.create_calls == 2
+    assert FakeChatGPTClient.register_emails == [
+        "first@example.com",
+        "first@example.com",
+        "second@example.com",
+    ]
+
+
+def test_same_email_retry_limit_expands_inner_retry_budget_and_tolerates_warning_logs(monkeypatch):
+    class FakeChatGPTClient(BaseFakeChatGPTClient):
+        register_emails = []
+
+        def register_complete_flow(self, email, *args, **kwargs):
+            self.__class__.register_emails.append(email)
+            if len(self.__class__.register_emails) < 4:
+                self._log("400 后进入状态纠偏", "warning")
+                return False, "HTTP 400: Failed to create account. Please try again."
+            return True, "ok"
+
+        def reuse_session_and_get_tokens(self):
+            return True, {
+                "access_token": "session-access-token",
+                "refresh_token": "session-refresh-token",
+                "session_token": "session-token",
+                "account_id": "acct-session",
+                "workspace_id": "ws-session",
+                "auth_provider": "openai",
+                "expires": "2099-01-01T00:00:00Z",
+                "user_id": "user-session",
+                "user": {"id": "user-session"},
+                "account": {"id": "acct-session"},
+            }
+
+    _patch_common_dependencies(monkeypatch, FakeChatGPTClient, UnusedOAuthClient)
+    logs = []
+    service = RecordingEmailService(
+        [
+            {"email": "Retry@Example.com", "service_id": "svc-1"},
+            {"email": "other@example.com", "service_id": "svc-2"},
+        ]
+    )
+
+    result = AnyAutoRegistrationEngine(
+        email_service=service,
+        max_retries=1,
+        callback_logger=logs.append,
+    ).run()
+
+    assert result["success"] is True
+    assert service.create_calls == 1
+    assert FakeChatGPTClient.register_emails == ["retry@example.com"] * 4
+    assert any("400 后进入状态纠偏" in line for line in logs)

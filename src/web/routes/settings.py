@@ -52,6 +52,8 @@ class RegistrationSettings(BaseModel):
     max_retries: int = 3
     timeout: int = 120
     default_password_length: int = 12
+    same_email_retry_limit: int = 4
+    email_prefix_alnum_only: bool = True
     sleep_min: int = 5
     sleep_max: int = 30
     entry_flow: str = "native"
@@ -118,6 +120,8 @@ async def get_all_settings():
             "max_retries": settings.registration_max_retries,
             "timeout": settings.registration_timeout,
             "default_password_length": settings.registration_default_password_length,
+            "same_email_retry_limit": settings.registration_same_email_retry_limit,
+            "email_prefix_alnum_only": settings.registration_email_prefix_alnum_only,
             "sleep_min": settings.registration_sleep_min,
             "sleep_max": settings.registration_sleep_max,
             "entry_flow": entry_flow,
@@ -315,6 +319,8 @@ async def get_registration_settings():
         "max_retries": settings.registration_max_retries,
         "timeout": settings.registration_timeout,
         "default_password_length": settings.registration_default_password_length,
+        "same_email_retry_limit": settings.registration_same_email_retry_limit,
+        "email_prefix_alnum_only": settings.registration_email_prefix_alnum_only,
         "sleep_min": settings.registration_sleep_min,
         "sleep_max": settings.registration_sleep_max,
         "entry_flow": entry_flow,
@@ -340,6 +346,9 @@ async def update_registration_settings(request: RegistrationSettings):
 
     if request.default_password_length < 8 or request.default_password_length > 64:
         raise HTTPException(status_code=400, detail="密码长度必须在 8-64 之间")
+
+    if request.same_email_retry_limit < 1 or request.same_email_retry_limit > 20:
+        raise HTTPException(status_code=400, detail="同一邮箱通用 400 重试次数必须在 1-20 之间")
 
     if request.sleep_min < 1 or request.sleep_max < request.sleep_min:
         raise HTTPException(status_code=400, detail="注册等待时间参数无效")
@@ -397,6 +406,8 @@ async def update_registration_settings(request: RegistrationSettings):
         registration_max_retries=request.max_retries,
         registration_timeout=request.timeout,
         registration_default_password_length=request.default_password_length,
+        registration_same_email_retry_limit=request.same_email_retry_limit,
+        registration_email_prefix_alnum_only=bool(request.email_prefix_alnum_only),
         registration_sleep_min=request.sleep_min,
         registration_sleep_max=request.sleep_max,
         registration_entry_flow=flow,
