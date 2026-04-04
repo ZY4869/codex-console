@@ -7,14 +7,30 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, desc, asc, func
 
+from ..core.timezone_utils import utcnow_naive
+from ..config.constants import (
+    PoolState,
+    account_label_to_role_tag,
+    normalize_account_label,
+    normalize_pool_state,
+    normalize_role_tag,
+    role_tag_to_account_label,
+)
 from .models import (
     Account,
     EmailService,
+    EmailRegistrationStat,
     RegistrationTask,
     Setting,
     Proxy,
     CpaService,
     Sub2ApiService,
+    TeamManagerService,
+    NewApiService,
+    ScheduledRegistrationJob,
+    BindCardTask,
+    TeamInviteRecord,
+    OperationAuditLog,
     TeamTask,
     TeamMember,
     TeamInviteTask,
@@ -33,27 +49,42 @@ def create_account(
     password: Optional[str] = None,
     client_id: Optional[str] = None,
     session_token: Optional[str] = None,
-    cookies: Optional[str] = None,
     email_service_id: Optional[str] = None,
     account_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
     access_token: Optional[str] = None,
     refresh_token: Optional[str] = None,
     id_token: Optional[str] = None,
+    cookies: Optional[str] = None,
+    remark: Optional[str] = None,
     proxy_used: Optional[str] = None,
     expires_at: Optional['datetime'] = None,
     extra_data: Optional[Dict[str, Any]] = None,
-    remark: Optional[str] = None,
     status: Optional[str] = None,
-    source: Optional[str] = None
+    source: Optional[str] = None,
+    account_label: Optional[str] = None,
+    role_tag: Optional[str] = None,
+    biz_tag: Optional[str] = None,
+    pool_state: Optional[str] = None,
+    pool_state_manual: Optional[str] = None,
+    priority: Optional[int] = None,
+    last_used_at: Optional['datetime'] = None,
 ) -> Account:
     """创建新账户"""
+    normalized_role_tag = normalize_role_tag(
+        role_tag if role_tag is not None else account_label_to_role_tag(account_label)
+    )
+    normalized_account_label = role_tag_to_account_label(normalized_role_tag)
+    normalized_pool_state = normalize_pool_state(pool_state) if pool_state is not None else PoolState.CANDIDATE_POOL.value
+    normalized_pool_state_manual = (
+        normalize_pool_state(pool_state_manual) if pool_state_manual is not None and str(pool_state_manual).strip() else None
+    )
+
     db_account = Account(
         email=email,
         password=password,
         client_id=client_id,
         session_token=session_token,
-        cookies=cookies,
         email_service=email_service,
         email_service_id=email_service_id,
         account_id=account_id,
@@ -61,13 +92,21 @@ def create_account(
         access_token=access_token,
         refresh_token=refresh_token,
         id_token=id_token,
+        cookies=cookies,
         remark=remark,
         proxy_used=proxy_used,
         expires_at=expires_at,
         extra_data=extra_data or {},
         status=status or 'active',
         source=source or 'register',
-        registered_at=datetime.utcnow()
+        account_label=normalized_account_label,
+        role_tag=normalized_role_tag,
+        biz_tag=(str(biz_tag).strip() or None) if biz_tag is not None else None,
+        pool_state=normalized_pool_state,
+        pool_state_manual=normalized_pool_state_manual,
+        priority=int(priority) if priority is not None else 50,
+        last_used_at=last_used_at,
+        registered_at=utcnow_naive()
     )
     db.add(db_account)
     db.commit()
@@ -125,8 +164,49 @@ def update_account(
         return None
 
     for key, value in kwargs.items():
+        if key == "role_tag" and value is not None:
+            normalized_role = normalize_role_tag(value)
+            db_account.role_tag = normalized_role
+            db_account.account_label = role_tag_to_account_label(normalized_role)
+            continue
+
+        if key == "account_label" and value is not None:
+            normalized_label = normalize_account_label(value)
+            db_account.account_label = normalized_label
+            db_account.role_tag = account_label_to_role_tag(normalized_label)
+            continue
+
+        if key in ("pool_state", "pool_state_manual"):
+            if value is None:
+                setattr(db_account, key, None)
+            elif str(value).strip():
+                setattr(db_account, key, normalize_pool_state(value))
+            else:
+                setattr(db_account, key, None)
+            continue
+
+        if key == "biz_tag":
+            db_account.biz_tag = str(value).strip() or None if value is not None else None
+            continue
+
+        if key == "priority" and value is not None:
+            try:
+                db_account.priority = int(value)
+            except Exception:
+                db_account.priority = 50
+            continue
+
+        if key in {"remark", "cookies", "session_token", "extra_data"} and hasattr(db_account, key):
+            setattr(db_account, key, value)
+            continue
+
         if hasattr(db_account, key) and value is not None:
             setattr(db_account, key, value)
+
+    # 兜底双写：保证旧字段 account_label 与 role_tag 始终一致
+    role_value = normalize_role_tag(getattr(db_account, "role_tag", None))
+    db_account.role_tag = role_value
+    db_account.account_label = role_tag_to_account_label(role_value)
 
     db.commit()
     db.refresh(db_account)
@@ -135,20 +215,69 @@ def update_account(
 
 def delete_account(db: Session, account_id: int) -> bool:
     """删除账户"""
+    def _detach_bind_card_tasks(snapshot_email: str):
+        linked_tasks = db.query(BindCardTask).filter(BindCardTask.account_id == account_id).all()
+        for task in linked_tasks:
+            if not str(getattr(task, "account_email", "") or "").strip():
+                task.account_email = snapshot_email
+            task.account_id = None
+
+    def _detach_team_invite_records(snapshot_email: str):
+        linked_records = db.query(TeamInviteRecord).filter(TeamInviteRecord.inviter_account_id == account_id).all()
+        for record in linked_records:
+            if not str(getattr(record, "inviter_email", "") or "").strip():
+                record.inviter_email = snapshot_email
+            record.inviter_account_id = None
+
     db_account = get_account_by_id(db, account_id)
     if not db_account:
         return False
 
-    db.delete(db_account)
-    db.commit()
-    return True
+    try:
+        # 正常路径：保留绑卡任务历史，先解绑再删账号
+        _detach_bind_card_tasks(db_account.email)
+        _detach_team_invite_records(db_account.email)
+        db.flush()
+        db.delete(db_account)
+        db.commit()
+        return True
+    except Exception as e:
+        db.rollback()
+        err = str(e).lower()
+        need_retry_with_migration = (
+            "bind_card_tasks" in err and
+            "account_id" in err and
+            ("not null" in err or "constraint failed" in err or "foreign key" in err)
+        )
+        if not need_retry_with_migration:
+            raise
+
+        # 旧库结构兜底：先跑迁移，再重试一次删除
+        from .session import get_session_manager
+        get_session_manager().migrate_tables()
+
+        db_account = get_account_by_id(db, account_id)
+        if not db_account:
+            return False
+        try:
+            _detach_bind_card_tasks(db_account.email)
+            _detach_team_invite_records(db_account.email)
+            db.flush()
+            db.delete(db_account)
+            db.commit()
+            return True
+        except Exception:
+            db.rollback()
+            raise
 
 
 def delete_accounts_batch(db: Session, account_ids: List[int]) -> int:
     """批量删除账户"""
-    result = db.query(Account).filter(Account.id.in_(account_ids)).delete(synchronize_session=False)
-    db.commit()
-    return result
+    deleted = 0
+    for account_id in account_ids:
+        if delete_account(db, account_id):
+            deleted += 1
+    return deleted
 
 
 def get_accounts_count(
@@ -254,6 +383,179 @@ def delete_email_service(db: Session, service_id: int) -> bool:
 
 
 # ============================================================================
+# 邮箱注册统计 CRUD
+# ============================================================================
+
+def get_email_registration_stat_by_email(db: Session, email_address: str) -> Optional[EmailRegistrationStat]:
+    """根据完整邮箱地址获取累计注册统计。"""
+    normalized_email = str(email_address or "").strip().lower()
+    if not normalized_email:
+        return None
+    return db.query(EmailRegistrationStat).filter(EmailRegistrationStat.email_address == normalized_email).first()
+
+
+def count_email_registration_stats(db: Session) -> int:
+    """获取邮箱累计统计总数。"""
+    return db.query(func.count(EmailRegistrationStat.id)).scalar() or 0
+
+
+def count_email_domain_registration_stats(db: Session) -> int:
+    """鑾峰彇鎸夐偖绠卞悗缂€鍚嶈仛鍚堢殑缁熻鎬绘暟銆?"""
+    return (
+        db.query(func.count(func.distinct(EmailRegistrationStat.email_domain)))
+        .filter(
+            EmailRegistrationStat.email_domain.isnot(None),
+            EmailRegistrationStat.email_domain != "",
+        )
+        .scalar()
+        or 0
+    )
+
+
+def get_email_registration_stats(
+    db: Session,
+    skip: int = 0,
+    limit: int = 50,
+) -> List[EmailRegistrationStat]:
+    """分页获取邮箱累计统计，按最近使用时间倒序。"""
+    return (
+        db.query(EmailRegistrationStat)
+        .order_by(desc(EmailRegistrationStat.last_used_at), desc(EmailRegistrationStat.updated_at))
+        .offset(max(0, skip))
+        .limit(max(1, limit))
+        .all()
+    )
+
+
+def get_email_domain_registration_stats(
+    db: Session,
+    skip: int = 0,
+    limit: int = 50,
+):
+    """鍒嗛〉鑾峰彇鎸夐偖绠卞悗缂€鍚嶈仛鍚堢殑娉ㄥ唽缁熻銆?"""
+    last_used_at = func.max(EmailRegistrationStat.last_used_at).label("last_used_at")
+    updated_at = func.max(EmailRegistrationStat.updated_at).label("updated_at")
+
+    return (
+        db.query(
+            EmailRegistrationStat.email_domain.label("email_domain"),
+            func.sum(EmailRegistrationStat.total_attempts).label("total_attempts"),
+            func.sum(EmailRegistrationStat.success_count).label("success_count"),
+            func.sum(EmailRegistrationStat.failure_count).label("failure_count"),
+            func.sum(EmailRegistrationStat.add_phone_count).label("add_phone_count"),
+            last_used_at,
+            updated_at,
+        )
+        .filter(
+            EmailRegistrationStat.email_domain.isnot(None),
+            EmailRegistrationStat.email_domain != "",
+        )
+        .group_by(EmailRegistrationStat.email_domain)
+        .order_by(desc(last_used_at), desc(updated_at))
+        .offset(max(0, skip))
+        .limit(max(1, limit))
+        .all()
+    )
+
+
+def get_email_domain_registration_summary(db: Session) -> Dict[str, Any]:
+    """返回按邮箱后缀聚合后的全量摘要。"""
+    filters = (
+        EmailRegistrationStat.email_domain.isnot(None),
+        EmailRegistrationStat.email_domain != "",
+    )
+    summary_row = (
+        db.query(
+            func.count(func.distinct(EmailRegistrationStat.email_domain)).label("total_domains"),
+            func.coalesce(func.sum(EmailRegistrationStat.total_attempts), 0).label("total_attempts"),
+            func.coalesce(func.sum(EmailRegistrationStat.success_count), 0).label("success_count"),
+            func.coalesce(func.sum(EmailRegistrationStat.failure_count), 0).label("failure_count"),
+            func.coalesce(func.sum(EmailRegistrationStat.add_phone_count), 0).label("add_phone_count"),
+        )
+        .filter(*filters)
+        .one()
+    )
+    top_attempts = func.sum(EmailRegistrationStat.total_attempts).label("top_domain_attempts")
+    top_last_used_at = func.max(EmailRegistrationStat.last_used_at).label("top_last_used_at")
+    top_domain_row = (
+        db.query(
+            EmailRegistrationStat.email_domain.label("email_domain"),
+            top_attempts,
+            top_last_used_at,
+        )
+        .filter(*filters)
+        .group_by(EmailRegistrationStat.email_domain)
+        .order_by(desc(top_attempts), desc(top_last_used_at), asc(EmailRegistrationStat.email_domain))
+        .first()
+    )
+
+    total_attempts = int(getattr(summary_row, "total_attempts", 0) or 0)
+    success_count = int(getattr(summary_row, "success_count", 0) or 0)
+    return {
+        "total_domains": int(getattr(summary_row, "total_domains", 0) or 0),
+        "total_attempts": total_attempts,
+        "success_count": success_count,
+        "failure_count": int(getattr(summary_row, "failure_count", 0) or 0),
+        "add_phone_count": int(getattr(summary_row, "add_phone_count", 0) or 0),
+        "success_rate": round((success_count / total_attempts) * 100, 1) if total_attempts > 0 else 0.0,
+        "top_domain": getattr(top_domain_row, "email_domain", None),
+        "top_domain_attempts": int(getattr(top_domain_row, "top_domain_attempts", 0) or 0),
+    }
+
+
+def record_email_registration_attempt(
+    db: Session,
+    *,
+    email_address: str,
+    email_service: Optional[str],
+    status: str,
+    error_message: Optional[str] = None,
+    occurred_at: Optional[datetime] = None,
+) -> Optional[EmailRegistrationStat]:
+    """按完整邮箱地址累计一次注册结果。"""
+    normalized_email = str(email_address or "").strip().lower()
+    if not normalized_email or "@" not in normalized_email:
+        return None
+
+    timestamp = occurred_at or utcnow_naive()
+    email_domain = normalized_email.split("@", 1)[1].strip().lower() if "@" in normalized_email else ""
+    normalized_status = str(status or "").strip().lower() or "failed"
+
+    stat = get_email_registration_stat_by_email(db, normalized_email)
+    if not stat:
+        stat = EmailRegistrationStat(
+            email_address=normalized_email,
+            email_domain=email_domain or None,
+            email_service=str(email_service or "").strip() or None,
+            total_attempts=0,
+            success_count=0,
+            failure_count=0,
+            add_phone_count=0,
+            created_at=timestamp,
+        )
+        db.add(stat)
+
+    stat.email_domain = email_domain or stat.email_domain
+    stat.email_service = str(email_service or "").strip() or stat.email_service
+    stat.total_attempts = int(stat.total_attempts or 0) + 1
+    stat.last_status = normalized_status
+    stat.last_error = str(error_message or "").strip() or None
+    stat.last_used_at = timestamp
+
+    if normalized_status == "success":
+        stat.success_count = int(stat.success_count or 0) + 1
+    elif normalized_status == "add_phone":
+        stat.add_phone_count = int(stat.add_phone_count or 0) + 1
+        stat.last_add_phone_at = timestamp
+    else:
+        stat.failure_count = int(stat.failure_count or 0) + 1
+
+    db.commit()
+    db.refresh(stat)
+    return stat
+
+
+# ============================================================================
 # 注册任务 CRUD
 # ============================================================================
 
@@ -350,9 +652,8 @@ def create_team_task(
     workspace_name: str = "MyTeam",
     proxy: Optional[str] = None,
     email_domain: Optional[str] = None,
-    upload_config: Optional[Dict[str, Any]] = None
+    upload_config: Optional[Dict[str, Any]] = None,
 ) -> TeamTask:
-    """创建 Team 编排任务。"""
     team_task = TeamTask(
         task_uuid=task_uuid,
         email_service_id=email_service_id,
@@ -369,17 +670,19 @@ def create_team_task(
 
 
 def get_team_task_by_uuid(db: Session, task_uuid: str) -> Optional[TeamTask]:
-    """根据 UUID 获取 Team 任务。"""
     return db.query(TeamTask).filter(TeamTask.task_uuid == task_uuid).first()
+
+
+def get_team_task_by_id(db: Session, team_task_id: int) -> Optional[TeamTask]:
+    return db.query(TeamTask).filter(TeamTask.id == team_task_id).first()
 
 
 def list_team_tasks(
     db: Session,
     status: Optional[str] = None,
     skip: int = 0,
-    limit: int = 100
+    limit: int = 100,
 ) -> List[TeamTask]:
-    """分页获取 Team 任务。"""
     query = db.query(TeamTask)
     if status:
         query = query.filter(TeamTask.status == status)
@@ -387,7 +690,6 @@ def list_team_tasks(
 
 
 def update_team_task(db: Session, task_uuid: str, **kwargs) -> Optional[TeamTask]:
-    """更新 Team 任务。"""
     team_task = get_team_task_by_uuid(db, task_uuid)
     if not team_task:
         return None
@@ -402,7 +704,6 @@ def update_team_task(db: Session, task_uuid: str, **kwargs) -> Optional[TeamTask
 
 
 def append_team_task_log(db: Session, task_uuid: str, log_message: str) -> bool:
-    """追加 Team 任务日志。"""
     team_task = get_team_task_by_uuid(db, task_uuid)
     if not team_task:
         return False
@@ -413,7 +714,6 @@ def append_team_task_log(db: Session, task_uuid: str, log_message: str) -> bool:
 
 
 def delete_team_task(db: Session, task_uuid: str) -> bool:
-    """删除 Team 任务。"""
     team_task = get_team_task_by_uuid(db, task_uuid)
     if not team_task:
         return False
@@ -429,9 +729,8 @@ def create_team_member(
     order_index: int,
     role: str,
     registration_task_uuid: Optional[str] = None,
-    account_id: Optional[int] = None
+    account_id: Optional[int] = None,
 ) -> TeamMember:
-    """创建 Team 成员记录。"""
     member = TeamMember(
         team_task_id=team_task_id,
         order_index=order_index,
@@ -447,12 +746,10 @@ def create_team_member(
 
 
 def get_team_member_by_id(db: Session, member_id: int) -> Optional[TeamMember]:
-    """根据 ID 获取 Team 成员。"""
     return db.query(TeamMember).filter(TeamMember.id == member_id).first()
 
 
 def get_team_members(db: Session, team_task_id: int) -> List[TeamMember]:
-    """获取任务下的成员列表。"""
     return (
         db.query(TeamMember)
         .filter(TeamMember.team_task_id == team_task_id)
@@ -462,7 +759,6 @@ def get_team_members(db: Session, team_task_id: int) -> List[TeamMember]:
 
 
 def update_team_member(db: Session, member_id: int, **kwargs) -> Optional[TeamMember]:
-    """更新 Team 成员。"""
     member = get_team_member_by_id(db, member_id)
     if not member:
         return None
@@ -476,16 +772,6 @@ def update_team_member(db: Session, member_id: int, **kwargs) -> Optional[TeamMe
     return member
 
 
-get_account = get_account_by_id
-get_registration_task = get_registration_task_by_uuid
-get_team_task = get_team_task_by_uuid
-
-
-def get_team_task_by_id(db: Session, team_task_id: int) -> Optional[TeamTask]:
-    """根据 ID 获取 Team 任务。"""
-    return db.query(TeamTask).filter(TeamTask.id == team_task_id).first()
-
-
 def create_team_invite_task(
     db: Session,
     task_uuid: str,
@@ -495,7 +781,6 @@ def create_team_invite_task(
     proxy: Optional[str] = None,
     upload_config: Optional[Dict[str, Any]] = None,
 ) -> TeamInviteTask:
-    """创建 Team 邀请任务。"""
     task = TeamInviteTask(
         task_uuid=task_uuid,
         source_mode=source_mode,
@@ -512,7 +797,6 @@ def create_team_invite_task(
 
 
 def get_team_invite_task_by_uuid(db: Session, task_uuid: str) -> Optional[TeamInviteTask]:
-    """根据 UUID 获取 Team 邀请任务。"""
     return db.query(TeamInviteTask).filter(TeamInviteTask.task_uuid == task_uuid).first()
 
 
@@ -522,7 +806,6 @@ def list_team_invite_tasks(
     skip: int = 0,
     limit: int = 100,
 ) -> List[TeamInviteTask]:
-    """分页获取 Team 邀请任务。"""
     query = db.query(TeamInviteTask)
     if status:
         query = query.filter(TeamInviteTask.status == status)
@@ -530,7 +813,6 @@ def list_team_invite_tasks(
 
 
 def update_team_invite_task(db: Session, task_uuid: str, **kwargs) -> Optional[TeamInviteTask]:
-    """更新 Team 邀请任务。"""
     task = get_team_invite_task_by_uuid(db, task_uuid)
     if not task:
         return None
@@ -545,7 +827,6 @@ def update_team_invite_task(db: Session, task_uuid: str, **kwargs) -> Optional[T
 
 
 def append_team_invite_task_log(db: Session, task_uuid: str, log_message: str) -> bool:
-    """追加 Team 邀请任务日志。"""
     task = get_team_invite_task_by_uuid(db, task_uuid)
     if not task:
         return False
@@ -556,7 +837,6 @@ def append_team_invite_task_log(db: Session, task_uuid: str, log_message: str) -
 
 
 def delete_team_invite_task(db: Session, task_uuid: str) -> bool:
-    """删除 Team 邀请任务。"""
     task = get_team_invite_task_by_uuid(db, task_uuid)
     if not task:
         return False
@@ -575,7 +855,6 @@ def create_team_invite_member(
     account_id: Optional[int] = None,
     source_team_task_id: Optional[int] = None,
 ) -> TeamInviteMember:
-    """创建 Team 邀请成员记录。"""
     member = TeamInviteMember(
         team_invite_task_id=team_invite_task_id,
         order_index=order_index,
@@ -592,12 +871,10 @@ def create_team_invite_member(
 
 
 def get_team_invite_member_by_id(db: Session, member_id: int) -> Optional[TeamInviteMember]:
-    """根据 ID 获取 Team 邀请成员。"""
     return db.query(TeamInviteMember).filter(TeamInviteMember.id == member_id).first()
 
 
 def get_team_invite_members(db: Session, team_invite_task_id: int) -> List[TeamInviteMember]:
-    """获取 Team 邀请任务下的成员列表。"""
     return (
         db.query(TeamInviteMember)
         .filter(TeamInviteMember.team_invite_task_id == team_invite_task_id)
@@ -607,7 +884,6 @@ def get_team_invite_members(db: Session, team_invite_task_id: int) -> List[TeamI
 
 
 def update_team_invite_member(db: Session, member_id: int, **kwargs) -> Optional[TeamInviteMember]:
-    """更新 Team 邀请成员。"""
     member = get_team_invite_member_by_id(db, member_id)
     if not member:
         return None
@@ -621,6 +897,9 @@ def update_team_invite_member(db: Session, member_id: int, **kwargs) -> Optional
     return member
 
 
+get_account = get_account_by_id
+get_registration_task = get_registration_task_by_uuid
+get_team_task = get_team_task_by_uuid
 get_team_invite_task = get_team_invite_task_by_uuid
 
 
@@ -651,7 +930,7 @@ def set_setting(
         db_setting.value = value
         db_setting.description = description or db_setting.description
         db_setting.category = category
-        db_setting.updated_at = datetime.utcnow()
+        db_setting.updated_at = utcnow_naive()
     else:
         db_setting = Setting(
             key=key,
@@ -678,8 +957,83 @@ def delete_setting(db: Session, key: str) -> bool:
 
 
 # ============================================================================
+# 操作审计日志
+# ============================================================================
+
+def create_operation_audit_log(
+    db: Session,
+    *,
+    actor: Optional[str],
+    action: str,
+    target_type: str,
+    target_id: Optional[Union[str, int]] = None,
+    target_email: Optional[str] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> OperationAuditLog:
+    row = OperationAuditLog(
+        actor=(str(actor or "").strip() or "system"),
+        action=str(action or "").strip() or "unknown_action",
+        target_type=str(target_type or "").strip() or "unknown_target",
+        target_id=(str(target_id).strip() if target_id is not None else None),
+        target_email=(str(target_email or "").strip() or None),
+        payload=dict(payload or {}),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def list_operation_audit_logs(
+    db: Session,
+    *,
+    limit: int = 100,
+    action: Optional[str] = None,
+    target_type: Optional[str] = None,
+) -> List[OperationAuditLog]:
+    safe_limit = max(1, min(500, int(limit or 100)))
+    query = db.query(OperationAuditLog)
+    if action:
+        query = query.filter(OperationAuditLog.action == str(action).strip())
+    if target_type:
+        query = query.filter(OperationAuditLog.target_type == str(target_type).strip())
+    return query.order_by(desc(OperationAuditLog.id)).limit(safe_limit).all()
+
+
+# ============================================================================
 # 代理 CRUD
 # ============================================================================
+
+def _ensure_single_default_proxy(db: Session) -> Optional[Proxy]:
+    """
+    保证代理表中“有且仅有一个默认代理”：
+    - 没有默认时，自动使用最早创建（ID 最小）的代理作为默认
+    - 有多个默认时，仅保留最早的一个
+    """
+    proxies = db.query(Proxy).order_by(asc(Proxy.id)).all()
+    if not proxies:
+        return None
+
+    default_proxies = [proxy for proxy in proxies if bool(proxy.is_default)]
+    keeper = default_proxies[0] if default_proxies else proxies[0]
+    changed = False
+
+    if not keeper.is_default:
+        keeper.is_default = True
+        changed = True
+
+    for proxy in proxies:
+        should_default = proxy.id == keeper.id
+        if bool(proxy.is_default) != should_default:
+            proxy.is_default = should_default
+            changed = True
+
+    if changed:
+        db.commit()
+        db.refresh(keeper)
+
+    return keeper
+
 
 def create_proxy(
     db: Session,
@@ -706,6 +1060,10 @@ def create_proxy(
     db.add(db_proxy)
     db.commit()
     db.refresh(db_proxy)
+
+    # 统一默认代理策略：首次添加自动默认，多代理保持“第一个默认”直到手动切换。
+    _ensure_single_default_proxy(db)
+    db.refresh(db_proxy)
     return db_proxy
 
 
@@ -721,6 +1079,7 @@ def get_proxies(
     limit: int = 100
 ) -> List[Proxy]:
     """获取代理列表"""
+    _ensure_single_default_proxy(db)
     query = db.query(Proxy)
 
     if enabled is not None:
@@ -762,6 +1121,7 @@ def delete_proxy(db: Session, proxy_id: int) -> bool:
 
     db.delete(db_proxy)
     db.commit()
+    _ensure_single_default_proxy(db)
     return True
 
 
@@ -771,34 +1131,44 @@ def update_proxy_last_used(db: Session, proxy_id: int) -> bool:
     if not db_proxy:
         return False
 
-    db_proxy.last_used = datetime.utcnow()
+    db_proxy.last_used = utcnow_naive()
     db.commit()
     return True
 
 
 def get_random_proxy(db: Session) -> Optional[Proxy]:
-    """随机获取一个启用的代理，优先返回 is_default=True 的代理"""
-    import random
-    # 优先返回默认代理
-    default_proxy = db.query(Proxy).filter(Proxy.enabled == True, Proxy.is_default == True).first()
+    """获取一个启用代理：优先默认代理，否则使用最早启用的代理。"""
+    _ensure_single_default_proxy(db)
+
+    # 优先返回启用状态下的默认代理
+    default_proxy = (
+        db.query(Proxy)
+        .filter(Proxy.enabled == True, Proxy.is_default == True)
+        .order_by(asc(Proxy.id))
+        .first()
+    )
     if default_proxy:
         return default_proxy
-    proxies = get_enabled_proxies(db)
-    if not proxies:
-        return None
-    return random.choice(proxies)
+
+    # 默认代理不可用时，回退到最早启用的代理（稳定而可预期）
+    return (
+        db.query(Proxy)
+        .filter(Proxy.enabled == True)
+        .order_by(asc(Proxy.id))
+        .first()
+    )
 
 
 def set_proxy_default(db: Session, proxy_id: int) -> Optional[Proxy]:
     """将指定代理设为默认，同时清除其他代理的默认标记"""
-    # 清除所有默认标记
-    db.query(Proxy).filter(Proxy.is_default == True).update({"is_default": False})
-    # 设置新的默认代理
     proxy = db.query(Proxy).filter(Proxy.id == proxy_id).first()
-    if proxy:
-        proxy.is_default = True
-        db.commit()
-        db.refresh(proxy)
+    if not proxy:
+        return None
+
+    db.query(Proxy).filter(Proxy.id != proxy_id, Proxy.is_default == True).update({"is_default": False})
+    proxy.is_default = True
+    db.commit()
+    db.refresh(proxy)
     return proxy
 
 
@@ -819,6 +1189,7 @@ def create_cpa_service(
     name: str,
     api_url: str,
     api_token: str,
+    proxy_url: Optional[str] = None,
     enabled: bool = True,
     priority: int = 0
 ) -> CpaService:
@@ -827,6 +1198,7 @@ def create_cpa_service(
         name=name,
         api_url=api_url,
         api_token=api_token,
+        proxy_url=proxy_url,
         enabled=enabled,
         priority=priority
     )
@@ -889,7 +1261,8 @@ def create_sub2api_service(
     api_url: str,
     api_key: str,
     template_config: Optional[Dict[str, Any]] = None,
-    next_name_index: int = 1,
+    next_name_index: Optional[int] = 1,
+    target_type: str = 'sub2api',
     enabled: bool = True,
     priority: int = 0
 ) -> Sub2ApiService:
@@ -899,7 +1272,8 @@ def create_sub2api_service(
         api_url=api_url,
         api_key=api_key,
         template_config=template_config,
-        next_name_index=next_name_index,
+        next_name_index=max(1, int(next_name_index or 1)),
+        target_type=target_type,
         enabled=enabled,
         priority=priority,
     )
@@ -931,6 +1305,8 @@ def update_sub2api_service(db: Session, service_id: int, **kwargs) -> Optional[S
     if not svc:
         return None
     for key, value in kwargs.items():
+        if key == "next_name_index":
+            value = max(1, int(value or 1))
         setattr(svc, key, value)
     db.commit()
     db.refresh(svc)
@@ -945,6 +1321,265 @@ def delete_sub2api_service(db: Session, service_id: int) -> bool:
     db.delete(svc)
     db.commit()
     return True
+
+
+# ============================================================================
+# new-api 鏈嶅姟 CRUD
+# ============================================================================
+
+def create_new_api_service(
+    db: Session,
+    name: str,
+    api_url: str,
+    username: str,
+    password: str,
+    enabled: bool = True,
+    priority: int = 0,
+) -> NewApiService:
+    """鍒涘缓 new-api 鏈嶅姟閰嶇疆"""
+    svc = NewApiService(
+        name=name,
+        api_url=api_url,
+        username=username,
+        password=password,
+        api_key='',
+        enabled=enabled,
+        priority=priority,
+    )
+    db.add(svc)
+    db.commit()
+    db.refresh(svc)
+    return svc
+
+
+def get_new_api_service_by_id(db: Session, service_id: int) -> Optional[NewApiService]:
+    """鎸?ID 鑾峰彇 new-api 鏈嶅姟"""
+    return db.query(NewApiService).filter(NewApiService.id == service_id).first()
+
+
+def get_new_api_services(
+    db: Session,
+    enabled: Optional[bool] = None,
+) -> List[NewApiService]:
+    """鑾峰彇 new-api 鏈嶅姟鍒楄〃"""
+    query = db.query(NewApiService)
+    if enabled is not None:
+        query = query.filter(NewApiService.enabled == enabled)
+    return query.order_by(asc(NewApiService.priority), asc(NewApiService.id)).all()
+
+
+def update_new_api_service(
+    db: Session,
+    service_id: int,
+    **kwargs,
+) -> Optional[NewApiService]:
+    """鏇存柊 new-api 鏈嶅姟閰嶇疆"""
+    svc = get_new_api_service_by_id(db, service_id)
+    if not svc:
+        return None
+    for key, value in kwargs.items():
+        if hasattr(svc, key):
+            setattr(svc, key, value)
+    db.commit()
+    db.refresh(svc)
+    return svc
+
+
+def delete_new_api_service(db: Session, service_id: int) -> bool:
+    """鍒犻櫎 new-api 鏈嶅姟閰嶇疆"""
+    svc = get_new_api_service_by_id(db, service_id)
+    if not svc:
+        return False
+    db.delete(svc)
+    db.commit()
+    return True
+
+
+# ============================================================================
+# 璁″垝娉ㄥ唽浠诲姟 CRUD
+# ============================================================================
+
+def create_scheduled_registration_job(
+    db: Session,
+    job_uuid: str,
+    name: str,
+    schedule_type: str,
+    schedule_config: Dict[str, Any],
+    registration_config: Dict[str, Any],
+    next_run_at: Optional[datetime],
+    enabled: bool = True,
+    timezone: str = 'local',
+    status: str = 'idle',
+) -> ScheduledRegistrationJob:
+    """鍒涘缓璁″垝娉ㄥ唽浠诲姟"""
+    job = ScheduledRegistrationJob(
+        job_uuid=job_uuid,
+        name=name,
+        enabled=enabled,
+        status=status,
+        schedule_type=schedule_type,
+        schedule_config=schedule_config,
+        registration_config=registration_config,
+        timezone=timezone,
+        next_run_at=next_run_at,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def get_scheduled_registration_job_by_uuid(db: Session, job_uuid: str) -> Optional[ScheduledRegistrationJob]:
+    """鎸?UUID 鑾峰彇璁″垝娉ㄥ唽浠诲姟"""
+    return db.query(ScheduledRegistrationJob).filter(ScheduledRegistrationJob.job_uuid == job_uuid).first()
+
+
+def get_scheduled_registration_job_by_id(db: Session, job_id: int) -> Optional[ScheduledRegistrationJob]:
+    """鎸?ID 鑾峰彇璁″垝娉ㄥ唽浠诲姟"""
+    return db.query(ScheduledRegistrationJob).filter(ScheduledRegistrationJob.id == job_id).first()
+
+
+def get_scheduled_registration_jobs(
+    db: Session,
+    enabled: Optional[bool] = None,
+    skip: int = 0,
+    limit: int = 100,
+) -> List[ScheduledRegistrationJob]:
+    """鑾峰彇璁″垝娉ㄥ唽浠诲姟鍒楄〃"""
+    query = db.query(ScheduledRegistrationJob)
+    if enabled is not None:
+        query = query.filter(ScheduledRegistrationJob.enabled == enabled)
+    return query.order_by(desc(ScheduledRegistrationJob.created_at)).offset(skip).limit(limit).all()
+
+
+def get_due_scheduled_registration_jobs(db: Session, now: datetime) -> List[ScheduledRegistrationJob]:
+    """鑾峰彇宸插埌鏈熺殑璁″垝娉ㄥ唽浠诲姟"""
+    return db.query(ScheduledRegistrationJob).filter(
+        ScheduledRegistrationJob.enabled == True,
+        ScheduledRegistrationJob.is_running == False,
+        ScheduledRegistrationJob.next_run_at.isnot(None),
+        ScheduledRegistrationJob.next_run_at <= now,
+    ).order_by(asc(ScheduledRegistrationJob.next_run_at), asc(ScheduledRegistrationJob.id)).all()
+
+
+def get_running_scheduled_registration_jobs(db: Session) -> List[ScheduledRegistrationJob]:
+    """鑾峰彇姝ｅ湪鎵ц鐨勮鍒掓敞鍐屼换鍔?"""
+    return db.query(ScheduledRegistrationJob).filter(
+        ScheduledRegistrationJob.is_running == True,
+    ).order_by(asc(ScheduledRegistrationJob.updated_at), asc(ScheduledRegistrationJob.id)).all()
+
+
+def update_scheduled_registration_job(
+    db: Session,
+    job_uuid: str,
+    **kwargs,
+) -> Optional[ScheduledRegistrationJob]:
+    """鏇存柊璁″垝娉ㄥ唽浠诲姟"""
+    job = get_scheduled_registration_job_by_uuid(db, job_uuid)
+    if not job:
+        return None
+    for key, value in kwargs.items():
+        if hasattr(job, key):
+            setattr(job, key, value)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def delete_scheduled_registration_job(db: Session, job_uuid: str) -> bool:
+    """鍒犻櫎璁″垝娉ㄥ唽浠诲姟"""
+    job = get_scheduled_registration_job_by_uuid(db, job_uuid)
+    if not job:
+        return False
+    db.delete(job)
+    db.commit()
+    return True
+
+
+def claim_scheduled_registration_job(
+    db: Session,
+    job_uuid: str,
+    next_run_at: Optional[datetime],
+    now: datetime,
+) -> Optional[ScheduledRegistrationJob]:
+    """鎶㈠崰璁″垝娉ㄥ唽浠诲姟鎵ц鏉?"""
+    updated = db.query(ScheduledRegistrationJob).filter(
+        ScheduledRegistrationJob.job_uuid == job_uuid,
+        ScheduledRegistrationJob.enabled == True,
+        ScheduledRegistrationJob.is_running == False,
+    ).update({
+        'is_running': True,
+        'status': 'running',
+        'last_run_at': now,
+        'next_run_at': next_run_at,
+        'updated_at': now,
+    })
+    if not updated:
+        db.rollback()
+        return None
+    db.commit()
+    return get_scheduled_registration_job_by_uuid(db, job_uuid)
+
+
+def mark_scheduled_registration_job_success(
+    db: Session,
+    job_uuid: str,
+    now: datetime,
+    task_uuid: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    status: str = 'scheduled',
+) -> Optional[ScheduledRegistrationJob]:
+    """鏍囪璁″垝娉ㄥ唽浠诲姟鎵ц鎴愬姛"""
+    job = get_scheduled_registration_job_by_uuid(db, job_uuid)
+    if not job:
+        return None
+    job.is_running = False
+    job.status = status
+    job.last_success_at = now
+    job.last_error = None
+    job.run_count = (job.run_count or 0) + 1
+    job.consecutive_failures = 0
+    job.last_triggered_task_uuid = task_uuid
+    job.last_triggered_batch_id = batch_id
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def mark_scheduled_registration_job_failure(
+    db: Session,
+    job_uuid: str,
+    error_message: str,
+    now: datetime,
+) -> Optional[ScheduledRegistrationJob]:
+    """鏍囪璁″垝娉ㄥ唽浠诲姟鎵ц澶辫触"""
+    job = get_scheduled_registration_job_by_uuid(db, job_uuid)
+    if not job:
+        return None
+    job.is_running = False
+    job.status = 'failed'
+    job.last_error = error_message
+    job.run_count = (job.run_count or 0) + 1
+    job.consecutive_failures = (job.consecutive_failures or 0) + 1
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def mark_scheduled_registration_job_skipped(
+    db: Session,
+    job_uuid: str,
+    error_message: str,
+) -> Optional[ScheduledRegistrationJob]:
+    """鏍囪璁″垝娉ㄥ唽浠诲姟琚烦杩?"""
+    job = get_scheduled_registration_job_by_uuid(db, job_uuid)
+    if not job:
+        return None
+    job.last_error = error_message
+    job.status = 'idle' if job.enabled else 'paused'
+    db.commit()
+    db.refresh(job)
+    return job
 
 
 # ============================================================================

@@ -5,14 +5,25 @@
 
 import abc
 import logging
+import re
+import secrets
+import string
 from typing import Optional, Dict, Any, List
 from enum import Enum
+from functools import wraps
 
 from ..config.constants import EmailServiceType
 
 
 logger = logging.getLogger(__name__)
+
 VERIFICATION_EMAIL_KEYWORDS = ("openai", "xai", "x.ai", "grok")
+ALNUM_LOCAL_PART_PATTERN = re.compile(r"^[A-Za-z0-9]+$")
+ALNUM_PREFIX_REQUEST_KEYS = ("name", "prefix", "local", "alias")
+ALNUM_PREFIX_POLICY_EXEMPT_TYPES = {
+    EmailServiceType.OUTLOOK,
+    EmailServiceType.IMAP_MAIL,
+}
 
 
 class EmailServiceError(Exception):
@@ -163,6 +174,7 @@ class BaseEmailService(abc.ABC):
             if email_info.get("id") == email_id:
                 return email_info
         return None
+
     def wait_for_email(
         self,
         email: str,
@@ -204,11 +216,7 @@ class BaseEmailService(abc.ABC):
                         continue
 
                     # 检查邮箱地址
-                    if isinstance(email_data, dict):
-                        email_address = email_data.get("address") or email_data.get("email")
-                    else:
-                        email_address = email_data
-                    if email_address != email:
+                    if email_data.get("address") != email:
                         continue
 
                     # 获取邮件列表
@@ -259,15 +267,6 @@ class BaseEmailService(abc.ABC):
         """
         raise NotImplementedError("此邮箱服务不支持获取邮件列表")
 
-    def list_domains(self) -> List[str]:
-        """
-        列出当前服务可用域名（可选实现）
-
-        Returns:
-            域名列表
-        """
-        return []
-
     def get_message_content(self, email_id: str, message_id: str) -> Optional[Dict[str, Any]]:
         """
         获取邮件内容（可选实现）
@@ -308,6 +307,76 @@ class BaseEmailService(abc.ABC):
 def looks_like_verification_email(*parts: str) -> bool:
     text = "\n".join(str(part or "") for part in parts).lower()
     return any(keyword in text for keyword in VERIFICATION_EMAIL_KEYWORDS)
+
+
+def _load_email_prefix_alnum_only_setting() -> bool:
+    try:
+        from ..config.settings import get_settings
+
+        settings = get_settings()
+        return bool(getattr(settings, "registration_email_prefix_alnum_only", True))
+    except Exception:
+        return True
+
+
+def _generate_alnum_local_part(length: int = 10) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(max(1, length)))
+
+
+def _sanitize_local_part(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return text
+    sanitized = re.sub(r"[^A-Za-z0-9]+", "", text)
+    return sanitized or _generate_alnum_local_part()
+
+
+def _apply_email_prefix_policy_to_request_config(config: Any) -> Any:
+    if not _load_email_prefix_alnum_only_setting():
+        return config
+    if not isinstance(config, dict):
+        return config
+
+    normalized = dict(config)
+
+    for key in ALNUM_PREFIX_REQUEST_KEYS:
+        value = normalized.get(key)
+        if value is None or not str(value).strip():
+            continue
+        normalized[key] = _sanitize_local_part(value)
+
+    for key in ("address", "email"):
+        value = normalized.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        local_part, separator, domain = text.partition("@")
+        sanitized_local_part = _sanitize_local_part(local_part)
+        normalized[key] = f"{sanitized_local_part}{separator}{domain}" if separator else sanitized_local_part
+
+    return normalized
+
+
+def _validate_created_email_prefix(service_type: EmailServiceType, email_info: Any):
+    if service_type in ALNUM_PREFIX_POLICY_EXEMPT_TYPES:
+        return
+    if not _load_email_prefix_alnum_only_setting():
+        return
+    if not isinstance(email_info, dict):
+        return
+
+    email = str(email_info.get("email") or email_info.get("address") or "").strip()
+    if not email:
+        return
+
+    local_part = email.split("@", 1)[0].strip()
+    if local_part and ALNUM_LOCAL_PART_PATTERN.fullmatch(local_part):
+        return
+
+    raise EmailServiceError("邮箱前缀策略要求创建出的邮箱前缀只能包含字母和数字")
 
 
 class EmailServiceFactory:
@@ -356,6 +425,28 @@ class EmailServiceFactory:
         service_class = cls._registry[service_type]
         try:
             instance = service_class(config, name)
+            original_create_email = instance.create_email
+
+            @wraps(original_create_email)
+            def create_email_with_prefix_policy(*args, **kwargs):
+                if service_type in ALNUM_PREFIX_POLICY_EXEMPT_TYPES:
+                    return original_create_email(*args, **kwargs)
+
+                patched_args = list(args)
+                patched_kwargs = dict(kwargs)
+
+                if patched_args:
+                    patched_args[0] = _apply_email_prefix_policy_to_request_config(patched_args[0])
+                elif "config" in patched_kwargs:
+                    patched_kwargs["config"] = _apply_email_prefix_policy_to_request_config(
+                        patched_kwargs.get("config")
+                    )
+
+                payload = original_create_email(*patched_args, **patched_kwargs)
+                _validate_created_email_prefix(service_type, payload)
+                return payload
+
+            instance.create_email = create_email_with_prefix_policy
             return instance
         except Exception as e:
             raise ValueError(f"创建邮箱服务失败: {e}")

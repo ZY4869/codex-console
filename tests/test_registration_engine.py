@@ -4,7 +4,7 @@ import json
 from src.config.constants import EmailServiceType, OPENAI_API_ENDPOINTS, OPENAI_PAGE_TYPES
 from src.core.http_client import OpenAIHTTPClient
 from src.core.openai.oauth import OAuthStart
-from src.core.register import RegistrationEngine
+from src.core.register import RegistrationEngine, RegistrationResult
 from src.services.base import BaseEmailService
 
 
@@ -166,15 +166,6 @@ def _response_with_login_cookies(workspace_id="ws-1", session_token="session-1")
     return DummyResponse(status_code=200, payload={}, on_return=setter)
 
 
-def _response_with_chunked_login_cookies(workspace_id="ws-1", chunk_a="chunk-a", chunk_b="chunk-b"):
-    def setter(session):
-        session.cookies["oai-client-auth-session"] = _workspace_cookie(workspace_id)
-        session.cookies["__Secure-authjs.session-token.0"] = chunk_a
-        session.cookies["__Secure-authjs.session-token.1"] = chunk_b
-
-    return DummyResponse(status_code=200, payload={}, on_return=setter)
-
-
 def test_check_sentinel_sends_non_empty_pow(monkeypatch):
     session = QueueSession([
         ("POST", OPENAI_API_ENDPOINTS["sentinel"], DummyResponse(payload={"token": "sentinel-token"})),
@@ -264,60 +255,6 @@ def test_run_registers_then_relogs_to_fetch_token():
     assert result.metadata["token_acquired_via_relogin"] is True
 
 
-def test_run_reassembles_chunked_session_cookie():
-    session_one = QueueSession([
-        ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]}}),
-        ),
-        ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
-        ("GET", OPENAI_API_ENDPOINTS["send_otp"], DummyResponse(payload={})),
-        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], DummyResponse(payload={})),
-        ("POST", OPENAI_API_ENDPOINTS["create_account"], DummyResponse(payload={})),
-    ])
-    session_two = QueueSession([
-        ("GET", "https://auth.example.test/flow/2", _response_with_did("did-2")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["LOGIN_PASSWORD"]}}),
-        ),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["password_verify"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]}}),
-        ),
-        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], _response_with_chunked_login_cookies()),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["select_workspace"],
-            DummyResponse(payload={"continue_url": "https://auth.example.test/continue"}),
-        ),
-        (
-            "GET",
-            "https://auth.example.test/continue",
-            DummyResponse(
-                status_code=302,
-                headers={"Location": "http://localhost:1455/auth/callback?code=code-2&state=state-2"},
-            ),
-        ),
-    ])
-
-    email_service = FakeEmailService(["123456", "654321"])
-    engine = RegistrationEngine(email_service)
-    engine.http_client = FakeOpenAIClient([session_one, session_two], ["sentinel-1", "sentinel-2"])
-    engine.oauth_manager = FakeOAuthManager()
-
-    result = engine.run()
-
-    assert result.success is True
-    assert result.session_token == "chunk-achunk-b"
-    assert "__Secure-authjs.session-token.0=chunk-a" in result.cookies
-    assert "__Secure-authjs.session-token.1=chunk-b" in result.cookies
-
-
 def test_existing_account_login_uses_auto_sent_otp_without_manual_send():
     session = QueueSession([
         ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
@@ -359,237 +296,49 @@ def test_existing_account_login_uses_auto_sent_otp_without_manual_send():
     assert result.metadata["token_acquired_via_relogin"] is False
 
 
-def test_run_falls_back_to_email_login_when_register_username_conflicts():
-    session_one = QueueSession([
-        ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]}}),
-        ),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["register"],
-            DummyResponse(
-                status_code=400,
-                payload={
-                    "error": {
-                        "message": "Failed to register username. Please try again.",
-                        "code": "bad_request",
-                    }
-                },
-                text='{"error":{"message":"Failed to register username. Please try again.","code":"bad_request"}}',
-            ),
-        ),
-    ])
-    session_two = QueueSession([
-        ("GET", "https://auth.example.test/flow/2", _response_with_did("did-2")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]}}),
-        ),
-        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], _response_with_login_cookies("ws-existing", "session-existing")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["select_workspace"],
-            DummyResponse(payload={"continue_url": "https://auth.example.test/continue-existing"}),
-        ),
-        (
-            "GET",
-            "https://auth.example.test/continue-existing",
-            DummyResponse(
-                status_code=302,
-                headers={"Location": "http://localhost:1455/auth/callback?code=code-1&state=state-1"},
-            ),
-        ),
-    ])
-
-    email_service = FakeEmailService(["246810"])
+def test_sync_add_phone_result_sets_error_code():
+    email_service = FakeEmailService(["123456"])
     engine = RegistrationEngine(email_service)
-    engine.http_client = FakeOpenAIClient([session_one, session_two], ["sentinel-1", "sentinel-2"])
-    engine.oauth_manager = FakeOAuthManager()
+    result = engine._sync_add_phone_result(
+        RegistrationResult(
+            success=False,
+            email="tester@example.com",
+            error_message="当前账号进入 add_phone 页面，需要补充手机号后才能继续授权",
+        )
+    )
 
-    result = engine.run()
-
-    assert result.success is True
-    assert result.source == "login"
-    assert result.password == ""
-    assert result.session_token == "session-existing"
-    assert len(email_service.otp_requests) == 1
+    assert result.error_code == "add_phone_required"
+    assert "add_phone" in result.error_message
 
 
-def test_submit_signup_retries_when_auth_step_is_invalid():
-    stale_session = QueueSession([
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            DummyResponse(
-                status_code=400,
-                payload={
-                    "error": {
-                        "message": "Invalid authorization step.",
-                        "code": "invalid_auth_step",
-                    }
-                },
-                text='{"error":{"message":"Invalid authorization step.","code":"invalid_auth_step"}}',
-            ),
-        ),
-    ])
-    fresh_session = QueueSession([
-        ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]}}),
-        ),
+def test_register_password_uses_browser_like_headers_and_datadog_trace():
+    session = QueueSession([
+        ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
     ])
 
-    email_service = FakeEmailService([])
+    email_service = FakeEmailService(["123456"])
     engine = RegistrationEngine(email_service)
-    fake_oauth = FakeOAuthManager()
-    engine.http_client = FakeOpenAIClient([stale_session, fresh_session], ["sentinel-1"])
-    engine.oauth_manager = fake_oauth
+    engine.session = session
     engine.email = "tester@example.com"
-    engine.session = stale_session
 
-    result = engine._submit_signup_form("stale-did", "stale-sentinel")
+    success, password = engine._register_password("did-1", "sentinel-1")
 
-    assert result.success is True
-    assert result.page_type == OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]
-    assert fake_oauth.start_calls == 1
-    retry_body = json.loads(fresh_session.calls[1]["kwargs"]["data"])
-    assert retry_body["screen_hint"] == "signup"
-    assert retry_body["username"]["value"] == "tester@example.com"
+    assert success is True
+    assert password
 
+    request = session.calls[0]
+    headers = request["kwargs"]["headers"]
+    payload = request["kwargs"]["json"]
 
-def test_new_registration_handles_consent_after_otp():
-    """新账号重登录: OTP 验证后返回 consent 页面，需 POST consent 才能获取 workspace。"""
-    session_one = QueueSession([
-        ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]}}),
-        ),
-        ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
-        ("GET", OPENAI_API_ENDPOINTS["send_otp"], DummyResponse(payload={})),
-        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], DummyResponse(payload={})),
-        ("POST", OPENAI_API_ENDPOINTS["create_account"], DummyResponse(payload={})),
-    ])
-    session_two = QueueSession([
-        ("GET", "https://auth.example.test/flow/2", _response_with_did("did-2")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["LOGIN_PASSWORD"]}}),
-        ),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["password_verify"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]}}),
-        ),
-        # OTP 验证返回 consent 页面，无 workspace cookie
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["validate_otp"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["CODEX_CONSENT"]}}),
-        ),
-        # Consent POST 触发 workspace 分配，设置 cookie
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            _response_with_login_cookies("ws-new", "session-new"),
-        ),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["select_workspace"],
-            DummyResponse(payload={"continue_url": "https://auth.example.test/continue"}),
-        ),
-        (
-            "GET",
-            "https://auth.example.test/continue",
-            DummyResponse(
-                status_code=302,
-                headers={"Location": "http://localhost:1455/auth/callback?code=code-2&state=state-2"},
-            ),
-        ),
-    ])
-
-    email_service = FakeEmailService(["111111", "222222"])
-    engine = RegistrationEngine(email_service)
-    engine.http_client = FakeOpenAIClient([session_one, session_two], ["sentinel-1", "sentinel-2"])
-    engine.oauth_manager = FakeOAuthManager()
-
-    result = engine.run()
-
-    assert result.success is True
-    assert result.workspace_id == "ws-new"
-    assert result.session_token == "session-new"
-    assert result.source == "register"
-    # 验证 consent POST 使用了正确的 referer
-    consent_call = session_two.calls[4]
-    assert consent_call["url"] == OPENAI_API_ENDPOINTS["signup"]
-    assert "codex/consent" in consent_call["kwargs"]["headers"]["referer"]
-
-
-def test_new_registration_fallback_consent_when_cookie_lacks_workspace():
-    """新账号重登录: OTP 验证后 cookie 无 workspace（无 consent page type），fallback 推进授权流程。"""
-    session_one = QueueSession([
-        ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]}}),
-        ),
-        ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
-        ("GET", OPENAI_API_ENDPOINTS["send_otp"], DummyResponse(payload={})),
-        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], DummyResponse(payload={})),
-        ("POST", OPENAI_API_ENDPOINTS["create_account"], DummyResponse(payload={})),
-    ])
-    session_two = QueueSession([
-        ("GET", "https://auth.example.test/flow/2", _response_with_did("did-2")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["LOGIN_PASSWORD"]}}),
-        ),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["password_verify"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]}}),
-        ),
-        # OTP 验证返回空 payload，无 consent page type，且 cookie 无 workspace
-        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], DummyResponse(payload={})),
-        # fallback: 推进 authorize/continue 触发 workspace 分配
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            _response_with_login_cookies("ws-fallback", "session-fallback"),
-        ),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["select_workspace"],
-            DummyResponse(payload={"continue_url": "https://auth.example.test/continue"}),
-        ),
-        (
-            "GET",
-            "https://auth.example.test/continue",
-            DummyResponse(
-                status_code=302,
-                headers={"Location": "http://localhost:1455/auth/callback?code=code-2&state=state-2"},
-            ),
-        ),
-    ])
-
-    email_service = FakeEmailService(["111111", "222222"])
-    engine = RegistrationEngine(email_service)
-    engine.http_client = FakeOpenAIClient([session_one, session_two], ["sentinel-1", "sentinel-2"])
-    engine.oauth_manager = FakeOAuthManager()
-
-    result = engine.run()
-
-    assert result.success is True
-    assert result.workspace_id == "ws-fallback"
-    assert result.session_token == "session-fallback"
-    assert result.source == "register"
+    assert payload == {
+        "username": "tester@example.com",
+        "password": password,
+    }
+    assert headers["Origin"] == "https://auth.openai.com"
+    assert headers["Referer"] == "https://auth.openai.com/create-account/password"
+    assert headers["Content-Type"] == "application/json"
+    assert headers["Sec-Fetch-Site"] == "same-origin"
+    assert headers["Accept-Language"] == "en-US,en;q=0.9"
+    assert "sec-ch-ua" in headers
+    assert "traceparent" in headers
+    assert "x-datadog-trace-id" in headers

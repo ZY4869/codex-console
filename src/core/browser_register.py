@@ -8,9 +8,9 @@ import logging
 import secrets
 from datetime import datetime
 from typing import Optional, Dict, Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-from .register import RegistrationResult
+from .register import RegistrationResult, enforce_refresh_token_requirement
 from .openai.oauth import OAuthManager, OAuthStart
 from ..services import BaseEmailService
 from ..config.constants import (
@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 NAV_TIMEOUT = 30_000
 ELEMENT_TIMEOUT = 15_000
 OTP_POLL_TIMEOUT = 120
+BROWSER_BIRTH_YEAR_MIN = 1995
+BROWSER_BIRTH_YEAR_MAX = 2000
 
 
 class BrowserRegistrationEngine:
@@ -112,6 +114,172 @@ class BrowserRegistrationEngine:
             cfg["password"] = parsed.password or ""
         return cfg
 
+    @staticmethod
+    def _clamp_browser_birth_year(year: int) -> int:
+        return max(BROWSER_BIRTH_YEAR_MIN, min(BROWSER_BIRTH_YEAR_MAX, int(year or BROWSER_BIRTH_YEAR_MAX)))
+
+    @classmethod
+    def _parse_birthdate_parts(cls, raw_value: str) -> Optional[tuple[int, int, int]]:
+        raw = str(raw_value or "").strip()
+        if not raw:
+            return None
+
+        normalized = raw.replace(".", "/").replace("-", "/")
+        pieces = [piece.strip() for piece in normalized.split("/") if piece.strip()]
+        if len(pieces) != 3 or not all(piece.isdigit() for piece in pieces):
+            return None
+
+        first, second, third = (int(piece) for piece in pieces)
+        if len(pieces[0]) == 4 or first > 31:
+            year, month, day = first, second, third
+        elif len(pieces[2]) == 4 or third > 31:
+            if first > 12 and second <= 12:
+                day, month, year = first, second, third
+            else:
+                month, day, year = first, second, third
+        else:
+            return None
+
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            return None
+        return year, month, day
+
+    @classmethod
+    def _build_browser_birthdate_candidates(cls, raw_birthdate: str) -> list[str]:
+        parts = cls._parse_birthdate_parts(raw_birthdate)
+        if not parts:
+            return [str(raw_birthdate or "").strip()]
+
+        year, month, day = parts
+        safe_year = cls._clamp_browser_birth_year(year)
+        candidates = [
+            f"{safe_year:04d}-{month:02d}-{day:02d}",
+            f"{month:02d}/{day:02d}/{safe_year:04d}",
+            f"{safe_year:04d}/{month:02d}/{day:02d}",
+            f"{month:02d}-{day:02d}-{safe_year:04d}",
+        ]
+        ordered: list[str] = []
+        seen = set()
+        for candidate in candidates:
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                ordered.append(candidate)
+        return ordered
+
+    @classmethod
+    def _repair_browser_birthdate_value(cls, observed_value: str, fallback_birthdate: str) -> str:
+        fallback_parts = cls._parse_birthdate_parts(fallback_birthdate)
+        if not fallback_parts:
+            return str(fallback_birthdate or "").strip()
+
+        fallback_year, fallback_month, fallback_day = fallback_parts
+        safe_year = cls._clamp_browser_birth_year(fallback_year)
+        observed = str(observed_value or "").strip()
+        observed_parts = cls._parse_birthdate_parts(observed)
+        if not observed_parts:
+            return cls._build_browser_birthdate_candidates(fallback_birthdate)[0]
+
+        observed_year, observed_month, observed_day = observed_parts
+        month = observed_month if 1 <= observed_month <= 12 else fallback_month
+        day = observed_day if 1 <= observed_day <= 31 else fallback_day
+
+        separator = "/"
+        for candidate_separator in ("/", "-", "."):
+            if candidate_separator in observed:
+                separator = candidate_separator
+                break
+
+        normalized = observed.replace(".", "/").replace("-", "/")
+        pieces = [piece.strip() for piece in normalized.split("/") if piece.strip()]
+        if len(pieces) == 3 and len(pieces[0]) == 4:
+            return f"{safe_year:04d}{separator}{month:02d}{separator}{day:02d}"
+        return f"{month:02d}{separator}{day:02d}{separator}{safe_year:04d}"
+
+    @classmethod
+    def _is_browser_birthdate_valid(cls, value: str) -> bool:
+        parts = cls._parse_birthdate_parts(value)
+        if not parts:
+            return False
+        year, _, _ = parts
+        return BROWSER_BIRTH_YEAR_MIN <= year <= BROWSER_BIRTH_YEAR_MAX
+
+    def _fill_birthdate_field(self, locator, raw_birthdate: str):
+        last_error = None
+        for candidate in self._build_browser_birthdate_candidates(raw_birthdate):
+            try:
+                locator.fill(candidate)
+                observed = candidate
+                try:
+                    observed = str(locator.input_value() or "").strip() or candidate
+                except Exception:
+                    pass
+
+                if self._is_browser_birthdate_valid(observed):
+                    return
+
+                repaired = self._repair_browser_birthdate_value(observed, raw_birthdate)
+                if repaired and repaired != observed:
+                    self._log(f"   检测到生日年份异常，自动修正为: {repaired}", "warning")
+                    locator.fill(repaired)
+                    if self._is_browser_birthdate_valid(repaired):
+                        return
+            except Exception as exc:
+                last_error = exc
+
+        if last_error is not None:
+            raise last_error
+
+    @classmethod
+    def _extract_callback_candidate(cls, raw_url: str) -> str:
+        candidate = str(raw_url or "").strip()
+        if not candidate:
+            return ""
+        if "code=" in candidate and "state=" in candidate:
+            return candidate
+
+        try:
+            parsed = urlparse(candidate)
+        except Exception:
+            return ""
+
+        nested_keys = (
+            "callbackUrl",
+            "callback_url",
+            "continue",
+            "continue_url",
+            "redirect_uri",
+            "redirectUrl",
+            "returnTo",
+            "return_to",
+        )
+        query_groups = (
+            parse_qs(parsed.query, keep_blank_values=True),
+            parse_qs(parsed.fragment, keep_blank_values=True),
+        )
+        for group in query_groups:
+            for key in nested_keys:
+                for value in group.get(key, []):
+                    nested = cls._extract_callback_candidate(unquote(str(value or "").strip()))
+                    if nested:
+                        return nested
+        return ""
+
+    def _click_post_signup_action(self, page, label: str) -> bool:
+        selectors = [
+            f'button:has-text("{label}")',
+            f'a:has-text("{label}")',
+            f'[role="button"]:has-text("{label}")',
+        ]
+        for selector in selectors:
+            locator = page.locator(selector).first
+            try:
+                locator.wait_for(state="visible", timeout=1500)
+                locator.click()
+                return True
+            except Exception:
+                continue
+        return False
+
     # ------------------------------------------------------------------
     # 主流程
     # ------------------------------------------------------------------
@@ -171,10 +339,16 @@ class BrowserRegistrationEngine:
             try:
                 page = browser.new_page()
 
+                def _remember_callback(raw_url: str, source: str = "page"):
+                    nonlocal callback_url
+                    candidate = self._extract_callback_candidate(raw_url)
+                    if candidate and not callback_url:
+                        callback_url = candidate
+                        self._log(f"   捕获到 OAuth 回调候选({source}): {candidate[:120]}")
+
                 # 拦截 OAuth 回调，提取 code
                 def _on_callback(route):
-                    nonlocal callback_url
-                    callback_url = route.request.url
+                    _remember_callback(route.request.url, "route")
                     route.fulfill(
                         status=200,
                         content_type="text/html",
@@ -182,6 +356,8 @@ class BrowserRegistrationEngine:
                     )
 
                 page.route("**/auth/callback*", _on_callback)
+                page.on("request", lambda request: _remember_callback(request.url, "request"))
+                page.on("framenavigated", lambda frame: _remember_callback(frame.url, "navigation"))
 
                 auth_url = oauth_start.auth_url + "&screen_hint=signup"
                 self._log("4. 打开注册页面...")
@@ -197,10 +373,13 @@ class BrowserRegistrationEngine:
                 self._check_cancelled()
                 self._step_profile(page)
                 self._check_cancelled()
-                self._step_post_signup(page)
+                post_signup_callback = self._step_post_signup(page)
+                if post_signup_callback:
+                    callback_url = callback_url or post_signup_callback
 
                 # 给回调路由一些时间触发
                 page.wait_for_timeout(3000)
+                _remember_callback(page.url, "final_url")
             finally:
                 self._browser_context = None
 
@@ -221,11 +400,14 @@ class BrowserRegistrationEngine:
             expected_state=oauth_start.state,
             code_verifier=oauth_start.code_verifier,
         )
-        result.success = True
         result.access_token = token_data.get("access_token", "")
         result.refresh_token = token_data.get("refresh_token", "")
         result.id_token = token_data.get("id_token", "")
         result.account_id = token_data.get("account_id", "")
+        if not enforce_refresh_token_requirement(result, subject="当前账号"):
+            self._log(result.error_message, "warning")
+            return
+        result.success = True
         self._log("注册成功！")
 
     # ------------------------------------------------------------------
@@ -311,7 +493,7 @@ class BrowserRegistrationEngine:
         ).first
         try:
             bd.wait_for(state="visible", timeout=3000)
-            bd.fill(info["birthdate"])
+            self._fill_birthdate_field(bd, info["birthdate"])
         except Exception:
             pass  # 生日字段可能不存在或为其他形式
 
@@ -321,22 +503,30 @@ class BrowserRegistrationEngine:
     def _step_post_signup(self, page):
         """处理注册后可能出现的 consent / workspace 选择等页面"""
         self._log("9. 处理后续确认页面...")
-        for _ in range(6):
-            if "/auth/callback" in page.url:
-                return
+        action_labels = (
+            "Continue",
+            "Agree",
+            "Accept",
+            "Continue to ChatGPT",
+            "Log in",
+            "Login",
+            "继续",
+            "同意",
+            "Stay logged in",
+        )
+        for _ in range(8):
+            callback_candidate = self._extract_callback_candidate(page.url)
+            if callback_candidate:
+                return callback_candidate
             clicked = False
-            for label in ("Continue", "Agree", "Accept", "继续", "同意", "Stay logged in"):
-                btn = page.locator(f'button:has-text("{label}")').first
-                try:
-                    btn.wait_for(state="visible", timeout=1500)
-                    btn.click()
+            for label in action_labels:
+                if self._click_post_signup_action(page, label):
                     page.wait_for_timeout(2000)
                     clicked = True
                     break
-                except Exception:
-                    continue
             if not clicked:
                 page.wait_for_timeout(2000)
+        return self._extract_callback_candidate(page.url)
 
     # ------------------------------------------------------------------
     # Turnstile 处理
@@ -368,6 +558,9 @@ class BrowserRegistrationEngine:
     def save_to_database(self, result: RegistrationResult) -> bool:
         """保存注册结果到数据库"""
         if not result.success:
+            return False
+        if not enforce_refresh_token_requirement(result, subject="当前账号"):
+            self._log(result.error_message, "warning")
             return False
         try:
             settings = get_settings()

@@ -10,6 +10,7 @@ from curl_cffi import requests as cffi_requests
 
 from ...database.models import Account
 from ...database.session import get_db
+from ..register import build_missing_refresh_token_error, has_required_refresh_token
 from .platform_upload_dedupe import (
     build_platform_duplicate_detail,
     load_platform_upload_record,
@@ -22,6 +23,14 @@ from .team_upload_guard import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_missing_upload_token_message(account: Account) -> str:
+    if not str(account.access_token or "").strip():
+        return "账号缺少 access_token"
+    if not has_required_refresh_token(account.refresh_token):
+        return build_missing_refresh_token_error("当前账号上传前")
+    return ""
 
 
 def _resolve_team_manager_duplicate_detail(
@@ -61,8 +70,9 @@ def upload_to_team_manager(
         return False, "Team Manager API URL 未配置"
     if not api_key:
         return False, "Team Manager API Key 未配置"
-    if not account.access_token:
-        return False, "账号缺少 access_token"
+    token_error = _build_missing_upload_token_message(account)
+    if token_error:
+        return False, token_error
 
     url = api_url.rstrip("/") + "/admin/teams/import"
     headers = {
@@ -137,10 +147,11 @@ def batch_upload_to_team_manager(
                     {"id": account_id, "email": None, "success": False, "error": "账号不存在"}
                 )
                 continue
-            if not account.access_token:
-                results["skipped_count"] += 1
+            token_error = _build_missing_upload_token_message(account)
+            if token_error:
+                results["failed_count"] += 1
                 results["details"].append(
-                    {"id": account_id, "email": account.email, "success": False, "error": "缺少 Token"}
+                    {"id": account_id, "email": account.email, "success": False, "error": token_error}
                 )
                 continue
             valid_accounts.append(account)

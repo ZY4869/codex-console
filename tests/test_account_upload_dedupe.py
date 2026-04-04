@@ -134,6 +134,27 @@ def test_batch_upload_to_cpa_skips_remote_duplicate(temp_database, monkeypatch):
     assert detail["duplicate_source"] == "remote"
 
 
+def test_batch_upload_to_cpa_marks_missing_refresh_token_as_failed(temp_database, monkeypatch):
+    account = create_account("cpa-missing-rt@example.com", refresh_token="")
+
+    monkeypatch.setattr(
+        cpa_upload.cffi_requests,
+        "post",
+        lambda *args, **kwargs: pytest.fail("CPA upload should not start without refresh_token"),
+    )
+
+    results = cpa_upload.batch_upload_to_cpa(
+        [account.id],
+        api_url="https://cpa.example.test",
+        api_token="token",
+    )
+
+    assert results["success_count"] == 0
+    assert results["failed_count"] == 1
+    assert results["skipped_count"] == 0
+    assert "refresh_token" in results["details"][0]["error"]
+
+
 def test_batch_upload_to_cpa_falls_back_to_local_record(temp_database, monkeypatch):
     account = create_account("local@example.com")
     service = create_cpa_service()
@@ -340,6 +361,29 @@ def test_batch_upload_to_team_manager_uses_local_record_dedupe(temp_database, mo
     detail = results["details"][0]
     assert detail["reason_code"] == PLATFORM_DUPLICATE_REASON
     assert detail["duplicate_source"] == "local_record"
+
+
+def test_batch_upload_to_team_manager_marks_missing_refresh_token_as_failed(temp_database, monkeypatch):
+    account = create_account("tm-missing-rt@example.com", refresh_token="")
+    service = create_tm_service()
+
+    monkeypatch.setattr(
+        team_manager_upload.cffi_requests,
+        "post",
+        lambda *args, **kwargs: pytest.fail("Team Manager upload should not start without refresh_token"),
+    )
+
+    results = team_manager_upload.batch_upload_to_team_manager(
+        [account.id],
+        service.api_url,
+        service.api_key,
+        service_id=service.id,
+    )
+
+    assert results["success_count"] == 0
+    assert results["failed_count"] == 1
+    assert results["skipped_count"] == 0
+    assert "refresh_token" in results["details"][0]["error"]
 
 
 def test_upload_account_to_tm_records_local_upload_success(temp_database, monkeypatch):

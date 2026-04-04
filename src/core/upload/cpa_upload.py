@@ -14,6 +14,7 @@ from curl_cffi import CurlMime
 from ...database.session import get_db
 from ...database.models import Account
 from ...config.settings import get_settings
+from ..register import build_missing_refresh_token_error, has_required_refresh_token
 from .platform_upload_dedupe import (
     build_platform_duplicate_detail,
     load_platform_upload_record,
@@ -26,6 +27,14 @@ from .team_upload_guard import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_missing_upload_token_message(*, access_token: str, refresh_token: str) -> str:
+    if not str(access_token or "").strip():
+        return "账号缺少 access_token"
+    if not has_required_refresh_token(refresh_token):
+        return build_missing_refresh_token_error("当前账号上传前")
+    return ""
 
 
 def _normalize_cpa_auth_files_url(api_url: str) -> str:
@@ -190,6 +199,43 @@ def _resolve_cpa_duplicate_detail(
         extra={"filename": record.get("filename") or filename},
     )
 
+def list_cpa_auth_files(api_url: str, api_token: str) -> Tuple[bool, Any, str]:
+    upload_url = _normalize_cpa_auth_files_url(api_url)
+    if not upload_url:
+        return False, None, "CPA API URL 鏈厤缃?"
+    if not api_token:
+        return False, None, "CPA API Token 鏈厤缃?"
+
+    try:
+        response = cffi_requests.get(
+            upload_url,
+            headers=_build_cpa_headers(api_token),
+            proxies=None,
+            timeout=15,
+            impersonate="chrome110",
+        )
+    except Exception as exc:
+        logger.warning("CPA auth-files query failed: %s", exc)
+        return False, None, f"鏌ヨ auth-files 澶辫触: {str(exc)}"
+
+    if response.status_code != 200:
+        return False, None, _extract_cpa_error(response)
+
+    try:
+        payload = response.json()
+    except Exception as exc:
+        logger.warning("CPA auth-files response is not JSON: %s", exc)
+        return False, None, "auth-files 杩斿洖鐨勪笉鏄?JSON"
+
+    return True, payload, "ok"
+
+
+def count_ready_cpa_auth_files(payload: Any) -> int:
+    filenames = _extract_cpa_filenames(payload)
+    if filenames is not None:
+        return len(filenames)
+    return 0
+
 
 def generate_token_json(account: Account, team_context: Optional[Dict[str, Any]] = None) -> dict:
     """
@@ -248,6 +294,13 @@ def upload_to_cpa(
 
     if not effective_token:
         return False, "CPA API Token 未配置"
+
+    token_error = _build_missing_upload_token_message(
+        access_token=token_data.get("access_token", ""),
+        refresh_token=token_data.get("refresh_token", ""),
+    )
+    if token_error:
+        return False, token_error
 
     upload_url = _normalize_cpa_auth_files_url(effective_url)
 
@@ -334,13 +387,17 @@ def batch_upload_to_cpa(
                 continue
 
             # 检查是否已有 Token
-            if not account.access_token:
-                results["skipped_count"] += 1
+            token_error = _build_missing_upload_token_message(
+                access_token=account.access_token,
+                refresh_token=account.refresh_token,
+            )
+            if token_error:
+                results["failed_count"] += 1
                 results["details"].append({
                     "id": account_id,
                     "email": account.email,
                     "success": False,
-                    "error": "缺少 Token"
+                    "error": token_error
                 })
                 continue
 
