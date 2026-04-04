@@ -8,6 +8,7 @@ from src.core.enhanced_protocol_register import (
     AdaptiveProtocolRegistrationEngine,
     EnhancedProtocolRegistrationEngine,
 )
+from src.core.register import MISSING_REFRESH_TOKEN_ERROR_CODE
 from src.database import crud
 from src.database.models import Base
 from src.database.session import DatabaseSessionManager
@@ -138,6 +139,7 @@ def test_enhanced_protocol_engine_persists_cookie_fallback_session(monkeypatch):
             return {
                 "success": True,
                 "access_token": "access-token",
+                "refresh_token": "refresh-token",
                 "account_id": "acct_cookie",
                 "workspace_id": "ws_cookie",
                 "metadata": {},
@@ -177,6 +179,32 @@ def test_enhanced_protocol_engine_respects_cancel(monkeypatch):
     assert "任务已取消" in result.error_message
 
 
+def test_enhanced_protocol_engine_fails_when_refresh_token_missing(monkeypatch):
+    class FakeAnyAutoRegistrationEngine:
+        def __init__(self, **kwargs):
+            self.email = "enhanced-missing-rt@example.com"
+            self.password = "Passw0rd!"
+            self.email_info = {"service_id": 3}
+            self.session = None
+
+        def run(self):
+            return {
+                "success": True,
+                "access_token": "access-token",
+                "refresh_token": "",
+                "metadata": {},
+            }
+
+    monkeypatch.setattr(adapter_module, "AnyAutoRegistrationEngine", FakeAnyAutoRegistrationEngine)
+
+    engine = EnhancedProtocolRegistrationEngine(email_service=DummyEmailService())
+    result = engine.run()
+
+    assert result.success is False
+    assert result.error_code == MISSING_REFRESH_TOKEN_ERROR_CODE
+    assert "refresh_token" in result.error_message
+
+
 def test_adaptive_protocol_engine_sets_flow_metadata_and_extra_config(monkeypatch):
     captured = {}
 
@@ -192,6 +220,7 @@ def test_adaptive_protocol_engine_sets_flow_metadata_and_extra_config(monkeypatc
             return {
                 "success": True,
                 "access_token": "adaptive-token",
+                "refresh_token": "adaptive-refresh-token",
                 "metadata": {},
             }
 
@@ -236,6 +265,7 @@ def _generic_400_result():
 
 def _stub_preauth(client):
     """Patch the pre-auth phase so register_complete_flow jumps to state machine."""
+    client._reset_session = MagicMock()
     client.visit_homepage = MagicMock(return_value=True)
     client.get_csrf_token = MagicMock(return_value="fake-csrf")
     client.signin = MagicMock(return_value="https://auth.openai.com/create-account/password")
@@ -349,17 +379,28 @@ def test_adaptive_recovery_to_completion():
     assert msg == "注册成功"
 
 
-def test_adaptive_recovery_still_password_page():
-    """400 后仍停留 create_account_password，应保持失败。"""
+def test_adaptive_recovery_still_password_page_retries_register_step():
+    """400 后回到注册密码阶段时，应继续补密码而不是提前失败。"""
     client = _make_client()
     _stub_preauth(client)
 
-    # Recovery state is still on the password page
-    recovery_state = FlowState(page_type="create_account_password",
-                               current_url="https://auth.openai.com/create-account/password")
+    recovery_state = FlowState(
+        page_type="api_accounts_user_register",
+        current_url="https://auth.openai.com/api/accounts/user/register",
+        continue_url="https://auth.openai.com/api/accounts/user/register",
+    )
+    about_you_state = FlowState(page_type="about_you",
+                                current_url="https://auth.openai.com/about-you")
+    complete_state = FlowState(page_type="callback",
+                               current_url="https://chatgpt.com/api/auth/callback/login-web")
 
-    client.register_user = MagicMock(return_value=_generic_400_result())
+    client.register_user = MagicMock(side_effect=[
+        _generic_400_result(),
+        RegisterUserResult(success=True, status_code=200, error_message="注册成功"),
+    ])
     client._probe_register_recovery_state = MagicMock(return_value=recovery_state)
+    client.verify_email_otp = MagicMock(return_value=(True, about_you_state))
+    client.create_account = MagicMock(return_value=(True, complete_state))
 
     skymail = FakeSkymailClient()
     success, msg = client.register_complete_flow(
@@ -367,8 +408,53 @@ def test_adaptive_recovery_still_password_page():
         skymail, adaptive_register_recovery=True,
     )
 
-    assert success is False
-    assert "注册失败" in msg
+    assert success is True
+    assert msg == "注册成功"
+    assert client.register_user.call_count == 2
+    assert client._reset_session.call_count == 1
+    assert client.visit_homepage.call_count == 2
+    assert client.get_csrf_token.call_count == 2
+    assert client.signin.call_count == 2
+    assert client.authorize.call_count == 2
+
+
+def test_adaptive_recovery_repeated_password_stage_does_not_trip_stuck_guard():
+    """多次纠偏回到注册密码阶段时，不应被通用卡住保护过早截断。"""
+    client = _make_client()
+    _stub_preauth(client)
+
+    recovery_state = FlowState(
+        page_type="api_accounts_user_register",
+        current_url="https://auth.openai.com/api/accounts/user/register",
+        continue_url="https://auth.openai.com/api/accounts/user/register",
+    )
+    about_you_state = FlowState(page_type="about_you", current_url="https://auth.openai.com/about-you")
+    complete_state = FlowState(page_type="callback", current_url="https://chatgpt.com/api/auth/callback/login-web")
+
+    client.register_user = MagicMock(side_effect=[
+        _generic_400_result(),
+        _generic_400_result(),
+        _generic_400_result(),
+        RegisterUserResult(success=True, status_code=200, error_message="注册成功"),
+    ])
+    client._probe_register_recovery_state = MagicMock(return_value=recovery_state)
+    client.verify_email_otp = MagicMock(return_value=(True, about_you_state))
+    client.create_account = MagicMock(return_value=(True, complete_state))
+
+    skymail = FakeSkymailClient()
+    success, msg = client.register_complete_flow(
+        "test@example.com", "Pass123!", "John", "Doe", "2000-01-01",
+        skymail, adaptive_register_recovery=True,
+    )
+
+    assert success is True
+    assert msg == "注册成功"
+    assert client.register_user.call_count == 4
+    assert client._reset_session.call_count == 3
+    assert client.visit_homepage.call_count == 4
+    assert client.get_csrf_token.call_count == 4
+    assert client.signin.call_count == 4
+    assert client.authorize.call_count == 4
 
 
 def test_adaptive_recovery_to_login_password():

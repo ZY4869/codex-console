@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .register import RegistrationResult
+from .register import RegistrationResult, enforce_refresh_token_requirement
 from .openai.oauth import OAuthManager, OAuthStart
 from ..services import BaseEmailService
 from ..config.constants import (
@@ -400,11 +400,14 @@ class BrowserRegistrationEngine:
             expected_state=oauth_start.state,
             code_verifier=oauth_start.code_verifier,
         )
-        result.success = True
         result.access_token = token_data.get("access_token", "")
         result.refresh_token = token_data.get("refresh_token", "")
         result.id_token = token_data.get("id_token", "")
         result.account_id = token_data.get("account_id", "")
+        if not enforce_refresh_token_requirement(result, subject="当前账号"):
+            self._log(result.error_message, "warning")
+            return
+        result.success = True
         self._log("注册成功！")
 
     # ------------------------------------------------------------------
@@ -555,6 +558,9 @@ class BrowserRegistrationEngine:
     def save_to_database(self, result: RegistrationResult) -> bool:
         """保存注册结果到数据库"""
         if not result.success:
+            return False
+        if not enforce_refresh_token_requirement(result, subject="当前账号"):
+            self._log(result.error_message, "warning")
             return False
         try:
             settings = get_settings()

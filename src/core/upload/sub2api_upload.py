@@ -11,6 +11,7 @@ from curl_cffi import requests as cffi_requests
 
 from ...database.models import Account
 from ...database.session import get_db
+from ..register import build_missing_refresh_token_error, has_required_refresh_token
 from .platform_upload_dedupe import (
     build_platform_duplicate_detail,
     load_platform_upload_record,
@@ -38,6 +39,14 @@ from .team_upload_guard import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_missing_upload_token_message(account: Account) -> str:
+    if not str(account.access_token or "").strip():
+        return "账号缺少 access_token"
+    if not has_required_refresh_token(account.refresh_token):
+        return build_missing_refresh_token_error("当前账号上传前")
+    return ""
 
 
 def _normalize_group_ids(values: Optional[List[int]]) -> List[int]:
@@ -413,16 +422,19 @@ def _perform_sub2api_upload(
     if not accounts:
         return results
 
-    uploadable_accounts = [acc for acc in accounts if acc.access_token]
-    skipped_accounts = [acc for acc in accounts if not acc.access_token]
-    for account in skipped_accounts:
-        results["skipped_count"] += 1
+    uploadable_accounts = []
+    for account in accounts:
+        token_error = _build_missing_upload_token_message(account)
+        if not token_error:
+            uploadable_accounts.append(account)
+            continue
+        results["failed_count"] += 1
         results["details"].append(
             {
                 "id": account.id,
                 "email": account.email,
                 "success": False,
-                "error": "缺少 access_token",
+                "error": token_error,
                 "group_id": None,
                 "group_name": None,
                 "naming_identity": normalize_sub2api_identity(account.subscription_type),
@@ -682,7 +694,13 @@ def upload_to_sub2api(
     )
     success = int(results.get("failed_count") or 0) <= 0 and int(results.get("success_count") or 0) > 0
     copy_total = int(results.get("copy_total") or 0)
-    account_total = len([acc for acc in accounts if acc.access_token])
+    account_total = len(
+        [
+            acc
+            for acc in accounts
+            if str(acc.access_token or "").strip() and has_required_refresh_token(acc.refresh_token)
+        ]
+    )
     if success:
         if copy_total > account_total:
             return True, f"成功上传 {account_total} 个账号，生成 {copy_total} 份分组副本"

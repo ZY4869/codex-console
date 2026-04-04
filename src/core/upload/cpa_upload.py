@@ -14,6 +14,7 @@ from curl_cffi import CurlMime
 from ...database.session import get_db
 from ...database.models import Account
 from ...config.settings import get_settings
+from ..register import build_missing_refresh_token_error, has_required_refresh_token
 from .platform_upload_dedupe import (
     build_platform_duplicate_detail,
     load_platform_upload_record,
@@ -26,6 +27,14 @@ from .team_upload_guard import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_missing_upload_token_message(*, access_token: str, refresh_token: str) -> str:
+    if not str(access_token or "").strip():
+        return "账号缺少 access_token"
+    if not has_required_refresh_token(refresh_token):
+        return build_missing_refresh_token_error("当前账号上传前")
+    return ""
 
 
 def _normalize_cpa_auth_files_url(api_url: str) -> str:
@@ -286,6 +295,13 @@ def upload_to_cpa(
     if not effective_token:
         return False, "CPA API Token 未配置"
 
+    token_error = _build_missing_upload_token_message(
+        access_token=token_data.get("access_token", ""),
+        refresh_token=token_data.get("refresh_token", ""),
+    )
+    if token_error:
+        return False, token_error
+
     upload_url = _normalize_cpa_auth_files_url(effective_url)
 
     filename = f"{token_data['email']}.json"
@@ -371,13 +387,17 @@ def batch_upload_to_cpa(
                 continue
 
             # 检查是否已有 Token
-            if not account.access_token:
-                results["skipped_count"] += 1
+            token_error = _build_missing_upload_token_message(
+                access_token=account.access_token,
+                refresh_token=account.refresh_token,
+            )
+            if token_error:
+                results["failed_count"] += 1
                 results["details"].append({
                     "id": account_id,
                     "email": account.email,
                     "success": False,
-                    "error": "缺少 Token"
+                    "error": token_error
                 })
                 continue
 

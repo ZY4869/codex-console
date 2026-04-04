@@ -1,4 +1,7 @@
+from types import SimpleNamespace
+
 from src.core.browser_register import BrowserRegistrationEngine
+from src.core.register import MISSING_REFRESH_TOKEN_ERROR_CODE, RegistrationResult
 
 
 def _build_engine():
@@ -109,3 +112,26 @@ def test_step_post_signup_clicks_login_and_returns_nested_callback():
 
     assert page.clicked == ["Log in"]
     assert callback_url == "http://localhost:1455/auth/callback?code=abc&state=xyz"
+
+
+def test_exchange_tokens_requires_refresh_token():
+    engine = _build_engine()
+    engine.oauth_manager = SimpleNamespace(
+        handle_callback=lambda **_kwargs: {
+            "access_token": "access-token",
+            "refresh_token": "",
+            "id_token": "id-token",
+            "account_id": "acct-1",
+        }
+    )
+    result = RegistrationResult(success=False)
+
+    engine._exchange_tokens(
+        result,
+        "http://localhost:1455/auth/callback?code=abc&state=xyz",
+        SimpleNamespace(state="xyz", code_verifier="verifier"),
+    )
+
+    assert result.success is False
+    assert result.error_code == MISSING_REFRESH_TOKEN_ERROR_CODE
+    assert "refresh_token" in result.error_message

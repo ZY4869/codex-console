@@ -157,6 +157,27 @@ def test_upload_to_sub2api_keeps_incremented_index_after_failure(temp_database, 
         assert saved_service.next_name_index == 6
 
 
+def test_batch_upload_to_sub2api_marks_missing_refresh_token_as_failed(temp_database, monkeypatch):
+    account = create_account("missing-rt@example.com", refresh_token="")
+
+    monkeypatch.setattr(
+        sub2api_upload.cffi_requests,
+        "post",
+        lambda *args, **kwargs: pytest.fail("Sub2API upload should not start without refresh_token"),
+    )
+
+    results = sub2api_upload.batch_upload_to_sub2api(
+        [account.id],
+        "https://sub2api.example.test",
+        "api-key",
+    )
+
+    assert results["success_count"] == 0
+    assert results["failed_count"] == 1
+    assert results["skipped_count"] == 0
+    assert "refresh_token" in results["details"][0]["error"]
+
+
 def test_export_route_uses_selected_service_counter(temp_database):
     account = create_account("export@example.com", remark="导出备注")
     service_a = create_sub2api_service(name="A", next_name_index=2)

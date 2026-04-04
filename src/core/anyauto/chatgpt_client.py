@@ -230,7 +230,13 @@ class ChatGPTClient:
         )
 
     def _state_is_password_registration(self, state: FlowState):
-        return state.page_type in {"create_account_password", "password"}
+        page_type = str(state.page_type or "").strip().lower()
+        target = f"{state.continue_url} {state.current_url}".lower()
+        return (
+            page_type in {"create_account_password", "password", "api_accounts_user_register"}
+            or "create-account/password" in target
+            or "/api/accounts/user/register" in target
+        )
 
     def _state_is_email_otp(self, state: FlowState):
         target = f"{state.continue_url} {state.current_url}".lower()
@@ -593,6 +599,57 @@ class ChatGPTClient:
             return next_state
         return response_state or probe_state
 
+    def _bootstrap_registration_state(self, email, *, max_auth_attempts=2, force_new_session=False):
+        if force_new_session:
+            self._log("纠偏后保留当前邮箱密码，重新启动完整注册流程", "warning")
+            self._reset_session()
+
+        self.last_registration_state = FlowState()
+
+        for auth_attempt in range(max_auth_attempts):
+            if auth_attempt > 0:
+                self._log(f"预授权阶段重试 {auth_attempt + 1}/{max_auth_attempts}...")
+                self._reset_session()
+
+            if not self.visit_homepage():
+                if auth_attempt < max_auth_attempts - 1:
+                    continue
+                return False, "访问首页失败"
+
+            csrf_token = self.get_csrf_token()
+            if not csrf_token:
+                if auth_attempt < max_auth_attempts - 1:
+                    continue
+                return False, "获取 CSRF token 失败"
+
+            auth_url = self.signin(email, csrf_token)
+            if not auth_url:
+                if auth_attempt < max_auth_attempts - 1:
+                    continue
+                return False, "提交邮箱失败"
+
+            final_url = self.authorize(auth_url)
+            if not final_url:
+                if auth_attempt < max_auth_attempts - 1:
+                    continue
+                return False, "Authorize 失败"
+
+            final_path = urlparse(final_url).path
+            self._log(f"Authorize -> {final_path}")
+
+            if "api/accounts/authorize" in final_path or final_path == "/error":
+                self._log(f"检测到 Cloudflare/SPA 中间页，准备重试预授权: {final_url[:160]}...")
+                if auth_attempt < max_auth_attempts - 1:
+                    continue
+                return False, f"预授权被拦截: {final_path}"
+
+            state = self._state_from_url(final_url)
+            self.last_registration_state = state
+            self._log(f"注册状态起点: {describe_flow_state(state)}")
+            return True, state
+
+        return False, "无法进入注册流程起点"
+
     def _register_user_result(self, email, password) -> RegisterUserResult:
         url = f"{self.AUTH}/api/accounts/user/register"
 
@@ -842,8 +899,6 @@ class ChatGPTClient:
         Returns:
             tuple: (success, message)
         """
-        from urllib.parse import urlparse
-        
         max_auth_attempts = 2
         final_url = ""
         final_path = ""
@@ -899,6 +954,8 @@ class ChatGPTClient:
         otp_verified = False
         account_created = False
         seen_states = {}
+        password_recovery_retries = 0
+        max_password_recovery_retries = 6
 
         for _ in range(12):
             signature = self._state_signature(state)
@@ -933,13 +990,37 @@ class ChatGPTClient:
                             self._log("400 后进入状态纠偏", "warning")
                             recovered_state = self._probe_register_recovery_state(register_result)
                             self._log(f"状态纠偏命中: {describe_flow_state(recovered_state)}")
+                            if self._state_is_password_registration(recovered_state):
+                                password_recovery_retries += 1
+                                if password_recovery_retries > max_password_recovery_retries:
+                                    self._log("纠偏后连续回到注册密码阶段次数过多，按失败处理", "warning")
+                                    return False, (
+                                        "注册失败: 纠偏后连续停留在注册密码阶段，"
+                                        f"已重试 {password_recovery_retries} 次 ({register_result.error_message})"
+                                    )
+                                register_submitted = False
+                                otp_verified = False
+                                account_created = False
+                                seen_states.clear()
+                                restarted, restart_state = self._bootstrap_registration_state(
+                                    email,
+                                    max_auth_attempts=max_auth_attempts,
+                                    force_new_session=True,
+                                )
+                                if not restarted:
+                                    return False, f"注册失败: 纠偏后整流程重启失败 ({restart_state})"
+                                state = restart_state
+                                self._log("纠偏后仍停留在注册密码阶段，复用同一邮箱密码从头开始注册", "warning")
+                                continue
                             if self._state_is_email_otp(recovered_state):
+                                password_recovery_retries = 0
                                 register_submitted = True
                                 state = recovered_state
                                 self.last_registration_state = state
                                 self._log("400 被忽略，继续进入验证码阶段", "warning")
                                 continue
                             if self._state_is_about_you(recovered_state):
+                                password_recovery_retries = 0
                                 register_submitted = True
                                 otp_verified = True
                                 state = recovered_state
@@ -958,6 +1039,7 @@ class ChatGPTClient:
                                 or str(recovered_state.page_type or "").strip().lower()
                                 in {"external_url", "callback", "oauth_callback", "chatgpt_home"}
                             ):
+                                password_recovery_retries = 0
                                 register_submitted = True
                                 otp_verified = True
                                 account_created = True
@@ -965,9 +1047,10 @@ class ChatGPTClient:
                                 self.last_registration_state = state
                                 self._log("400 被忽略，继续进入回调 / session 阶段", "warning")
                                 continue
-                            self._log("纠偏后仍停留密码页，按失败处理", "warning")
+                            self._log("纠偏后落在未知注册阶段，按失败处理", "warning")
                         return False, f"注册失败: {register_result.error_message}"
                     register_submitted = True
+                    password_recovery_retries = 0
                     if not self.send_email_otp():
                         self._log("发送验证码接口返回失败，继续等待邮箱中的验证码...")
                     state = self._state_from_url(f"{self.AUTH}/email-verification")
@@ -976,6 +1059,7 @@ class ChatGPTClient:
                 if not success:
                     return False, f"注册失败: {msg}"
                 register_submitted = True
+                password_recovery_retries = 0
                 if not self.send_email_otp():
                     self._log("发送验证码接口返回失败，继续等待邮箱中的验证码...")
                 state = self._state_from_url(f"{self.AUTH}/email-verification")

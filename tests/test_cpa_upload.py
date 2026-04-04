@@ -32,7 +32,7 @@ def test_upload_to_cpa_accepts_management_root_url(monkeypatch):
     monkeypatch.setattr(cpa_upload.cffi_requests, "post", fake_post)
 
     success, message = cpa_upload.upload_to_cpa(
-        {"email": "tester@example.com"},
+        {"email": "tester@example.com", "access_token": "at", "refresh_token": "rt"},
         api_url="https://cpa.example.com/v0/management",
         api_token="token-123",
     )
@@ -53,7 +53,7 @@ def test_upload_to_cpa_does_not_double_append_full_endpoint(monkeypatch):
     monkeypatch.setattr(cpa_upload.cffi_requests, "post", fake_post)
 
     success, _ = cpa_upload.upload_to_cpa(
-        {"email": "tester@example.com"},
+        {"email": "tester@example.com", "access_token": "at", "refresh_token": "rt"},
         api_url="https://cpa.example.com/v0/management/auth-files",
         api_token="token-123",
     )
@@ -77,7 +77,7 @@ def test_upload_to_cpa_falls_back_to_raw_json_when_multipart_returns_404(monkeyp
     monkeypatch.setattr(cpa_upload.cffi_requests, "post", fake_post)
 
     success, message = cpa_upload.upload_to_cpa(
-        {"email": "tester@example.com", "type": "codex"},
+        {"email": "tester@example.com", "type": "codex", "access_token": "at", "refresh_token": "rt"},
         api_url="https://cpa.example.com",
         api_token="token-123",
     )
@@ -88,6 +88,23 @@ def test_upload_to_cpa_falls_back_to_raw_json_when_multipart_returns_404(monkeyp
     assert calls[1]["url"] == "https://cpa.example.com/v0/management/auth-files?name=tester%40example.com.json"
     assert calls[1]["kwargs"]["headers"]["Content-Type"] == "application/json"
     assert calls[1]["kwargs"]["data"].startswith(b"{")
+
+
+def test_upload_to_cpa_requires_refresh_token(monkeypatch):
+    def fail_post(*_args, **_kwargs):
+        raise AssertionError("upload should not start without refresh_token")
+
+    monkeypatch.setattr(cpa_upload, "CurlMime", FakeMime)
+    monkeypatch.setattr(cpa_upload.cffi_requests, "post", fail_post)
+
+    success, message = cpa_upload.upload_to_cpa(
+        {"email": "tester@example.com", "access_token": "at", "refresh_token": ""},
+        api_url="https://cpa.example.com",
+        api_token="token-123",
+    )
+
+    assert success is False
+    assert "refresh_token" in message
 
 
 def test_test_cpa_connection_uses_get_and_normalized_url(monkeypatch):

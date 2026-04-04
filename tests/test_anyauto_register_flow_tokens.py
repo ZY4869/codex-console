@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from src.core.anyauto import register_flow as register_flow_module
 from src.core.anyauto.register_flow import AnyAutoRegistrationEngine
+from src.core.register import MISSING_REFRESH_TOKEN_ERROR_CODE
 
 
 class DummyEmailService:
@@ -98,7 +99,7 @@ def test_run_enriches_refresh_token_after_session_reuse(monkeypatch):
     assert FakeOAuthClient.login_calls == 1
 
 
-def test_run_keeps_session_tokens_when_oauth_enrichment_fails(monkeypatch):
+def test_run_fails_when_oauth_enrichment_does_not_produce_refresh_token(monkeypatch):
     class FakeOAuthClient:
         login_calls = 0
 
@@ -119,12 +120,7 @@ def test_run_keeps_session_tokens_when_oauth_enrichment_fails(monkeypatch):
 
     result = AnyAutoRegistrationEngine(email_service=DummyEmailService()).run()
 
-    assert result["success"] is True
-    assert result["access_token"] == "session-access-token"
-    assert result["refresh_token"] == ""
-    assert result["id_token"] == ""
-    assert result["session_token"] == "session-token"
-    assert result["account_id"] == "acct-session"
-    assert result["workspace_id"] == "ws-session"
-    assert result["metadata"]["oauth_token_enriched"] is False
+    assert result["success"] is False
+    assert result["error_code"] == MISSING_REFRESH_TOKEN_ERROR_CODE
+    assert "refresh_token" in result["error_message"]
     assert FakeOAuthClient.login_calls == 1

@@ -84,6 +84,23 @@ def test_upload_to_new_api_creates_channel_after_login(monkeypatch):
     assert calls[1]["kwargs"]["json"]["channel"]["type"] == new_api_upload.CHANNEL_TYPE_CODEX
 
 
+def test_upload_to_new_api_requires_refresh_token(monkeypatch):
+    def fail_create_session(*_args, **_kwargs):
+        raise AssertionError("new-api login should not start without refresh_token")
+
+    monkeypatch.setattr(new_api_upload, "create_new_api_session", fail_create_session)
+
+    success, message = new_api_upload.upload_to_new_api(
+        [make_account(refresh_token="")],
+        "https://newapi.example.com/",
+        "biubush",
+        "jy666666",
+    )
+
+    assert success is False
+    assert "refresh_token" in message
+
+
 def test_test_new_api_connection_uses_login(monkeypatch):
     calls = []
 

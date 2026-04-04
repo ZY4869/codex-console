@@ -11,7 +11,11 @@ from .openai.team_invitation import (
     resolve_session_cookie_from_cookie_store,
     serialize_cookie_store,
 )
-from .register import RegistrationCancelledError, RegistrationResult
+from .register import (
+    RegistrationCancelledError,
+    RegistrationResult,
+    enforce_refresh_token_requirement,
+)
 from ..config.settings import get_settings
 from ..database import crud
 from ..database.session import get_db
@@ -148,9 +152,13 @@ class EnhancedProtocolRegistrationEngine:
             metadata.setdefault("registered_at", datetime.now().isoformat())
             metadata["registration_flow"] = self.registration_flow_key
             result.metadata = metadata
+            result.error_code = str(payload.get("error_code") or "").strip()
 
             self._raise_if_cancelled()
             if payload.get("success") and not self._looks_like_add_phone(payload):
+                if not enforce_refresh_token_requirement(result, subject="当前账号"):
+                    self._log(result.error_message, "warning")
+                    return result
                 result.success = True
                 return result
 
@@ -174,6 +182,9 @@ class EnhancedProtocolRegistrationEngine:
 
     def save_to_database(self, result: RegistrationResult) -> bool:
         if not result.success:
+            return False
+        if not enforce_refresh_token_requirement(result, subject="当前账号"):
+            self._log(result.error_message, "warning")
             return False
 
         try:

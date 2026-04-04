@@ -11,12 +11,21 @@ from curl_cffi import requests as cffi_requests
 
 from ...database.models import Account
 from ...database.session import get_db
+from ..register import build_missing_refresh_token_error, has_required_refresh_token
 
 logger = logging.getLogger(__name__)
 
 CHANNEL_TYPE_CODEX = 57
 CHANNEL_GROUP_DEFAULT = "default"
 DEFAULT_CODEX_MODELS = ['gpt-5', 'gpt-5-codex', 'gpt-5-codex-mini', 'gpt-5.1', 'gpt-5.1-codex', 'gpt-5.1-codex-max', 'gpt-5.1-codex-mini', 'gpt-5.2', 'gpt-5.2-codex', 'gpt-5.3-codex', 'gpt-5.3-codex-spark', 'gpt-5.4', 'gpt-5.4-mini']
+
+
+def _build_missing_upload_token_message(account: Account) -> str:
+    if not str(account.access_token or "").strip():
+        return "账号缺少 access_token"
+    if not has_required_refresh_token(account.refresh_token):
+        return build_missing_refresh_token_error("当前账号上传前")
+    return ""
 
 
 def normalize_new_api_url(api_url: str) -> str:
@@ -154,9 +163,13 @@ def upload_to_new_api(accounts: List[Account], api_url: str, username: str, pass
     if not accounts:
         return False, "无可上传的账号"
 
-    valid_accounts = [account for account in accounts if account.access_token]
+    valid_accounts = [
+        account
+        for account in accounts
+        if str(account.access_token or "").strip() and has_required_refresh_token(account.refresh_token)
+    ]
     if not valid_accounts:
-        return False, "所有账号均缺少 access_token，无法上传"
+        return False, "所有账号均缺少 access_token 或 refresh_token (RT)，无法上传"
 
     ok, message, session, _user_id = ensure_new_api_login(api_url, username, password)
     if not ok:
@@ -195,9 +208,10 @@ def batch_upload_to_new_api(account_ids: List[int], api_url: str, username: str,
                 results["failed_count"] += 1
                 results["details"].append({"id": account_id, "email": None, "success": False, "error": "账号不存在"})
                 continue
-            if not account.access_token:
-                results["skipped_count"] += 1
-                results["details"].append({"id": account_id, "email": account.email, "success": False, "error": "缺少 access_token"})
+            token_error = _build_missing_upload_token_message(account)
+            if token_error:
+                results["failed_count"] += 1
+                results["details"].append({"id": account_id, "email": account.email, "success": False, "error": token_error})
                 continue
             accounts.append(account)
 

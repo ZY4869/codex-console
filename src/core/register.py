@@ -98,6 +98,32 @@ class RegistrationResult:
         }
 
 
+MISSING_REFRESH_TOKEN_ERROR_CODE = "missing_refresh_token"
+
+
+def has_required_refresh_token(refresh_token: Optional[str]) -> bool:
+    return bool(str(refresh_token or "").strip())
+
+
+def build_missing_refresh_token_error(subject: str = "当前账号") -> str:
+    prefix = str(subject or "").strip() or "当前账号"
+    return f"{prefix}未拿到 refresh_token (RT)，按严格策略判定为失败"
+
+
+def enforce_refresh_token_requirement(
+    result: RegistrationResult,
+    *,
+    subject: str = "当前账号",
+) -> bool:
+    if has_required_refresh_token(getattr(result, "refresh_token", "")):
+        return True
+
+    result.success = False
+    result.error_code = MISSING_REFRESH_TOKEN_ERROR_CODE
+    result.error_message = build_missing_refresh_token_error(subject)
+    return False
+
+
 @dataclass
 class SignupFormResult:
     """提交注册表单的结果"""
@@ -888,7 +914,10 @@ class RegistrationEngine:
                         token_info = self._handle_oauth_callback(callback_url)
                         if token_info:
                             self._fill_result_from_token_info(result, token_info)
-                            return True
+                            if enforce_refresh_token_requirement(result, subject="当前账号"):
+                                return True
+                            self._log(result.error_message, "warning")
+                            return False
 
             # 尝试从 OAuth 授权入口续上
             if self.oauth_start and self.oauth_start.auth_url:
@@ -898,7 +927,10 @@ class RegistrationEngine:
                     token_info = self._handle_oauth_callback(callback_url)
                     if token_info:
                         self._fill_result_from_token_info(result, token_info)
-                        return True
+                        if enforce_refresh_token_requirement(result, subject="当前账号"):
+                            return True
+                        self._log(result.error_message, "warning")
+                        return False
 
             self._log("直接授权路径未能完成 token 获取", "warning")
             return False
@@ -966,6 +998,10 @@ class RegistrationEngine:
             if fallback_session_token:
                 self.session_token = fallback_session_token
                 result.session_token = fallback_session_token
+
+        if not enforce_refresh_token_requirement(result, subject="当前账号"):
+            self._log(result.error_message, "warning")
+            return False
 
         return True
 
@@ -1100,6 +1136,10 @@ class RegistrationEngine:
             else:
                 cookie_names = ", ".join(list_cookie_names(getattr(self.session, "cookies", None))) or "none"
                 self._log(f"这次登录没直接捞到 Session Token，当前捕获到的 cookie 名称: {cookie_names}", "warning")
+
+        if not enforce_refresh_token_requirement(result, subject="当前账号"):
+            self._log(result.error_message, "warning")
+            return False
 
         return True
 
@@ -2407,6 +2447,10 @@ class RegistrationEngine:
                     self._log(f"Workspace ID: {result.workspace_id}")
                     self._log("=" * 60)
 
+                    if not enforce_refresh_token_requirement(result, subject="当前账号"):
+                        self._log(result.error_message, "warning")
+                        return result
+
                     result.success = True
                     result.metadata = {
                         "email_service": self.email_service.service_type.value,
@@ -2456,6 +2500,10 @@ class RegistrationEngine:
                     self._log(f"Workspace ID: {result.workspace_id}")
                     self._log("=" * 60)
 
+                    if not enforce_refresh_token_requirement(result, subject="当前账号"):
+                        self._log(result.error_message, "warning")
+                        return result
+
                     result.success = True
                     result.metadata = {
                         "email_service": self.email_service.service_type.value,
@@ -2493,6 +2541,10 @@ class RegistrationEngine:
             self._log(f"Workspace ID: {result.workspace_id}")
             self._log("=" * 60)
 
+            if not enforce_refresh_token_requirement(result, subject="当前账号"):
+                self._log(result.error_message, "warning")
+                return result
+
             result.success = True
             result.metadata = {
                 "email_service": self.email_service.service_type.value,
@@ -2524,6 +2576,9 @@ class RegistrationEngine:
             是否保存成功
         """
         if not result.success:
+            return False
+        if not enforce_refresh_token_requirement(result, subject="当前账号"):
+            self._log(result.error_message, "warning")
             return False
 
         try:

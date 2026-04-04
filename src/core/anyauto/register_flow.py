@@ -14,6 +14,11 @@ from typing import Any, Callable, Dict, Optional
 from .chatgpt_client import ChatGPTClient
 from .oauth_client import OAuthClient
 from .utils import decode_jwt_payload, generate_random_birthday, generate_random_name
+from ..register import (
+    MISSING_REFRESH_TOKEN_ERROR_CODE,
+    build_missing_refresh_token_error,
+    has_required_refresh_token,
+)
 from ...config.constants import DEFAULT_PASSWORD_LENGTH, PASSWORD_CHARSET, PASSWORD_SPECIAL_CHARSET
 from ...config.settings import get_settings
 
@@ -193,6 +198,14 @@ class AnyAutoRegistrationEngine:
                 "token_pending": False,
                 "oauth_error": detail,
             },
+        }
+
+    @staticmethod
+    def _build_missing_refresh_token_failure_payload(subject: str = "当前账号") -> Dict[str, Any]:
+        return {
+            "success": False,
+            "error_code": MISSING_REFRESH_TOKEN_ERROR_CODE,
+            "error_message": build_missing_refresh_token_error(subject),
         }
 
     @staticmethod
@@ -502,6 +515,8 @@ class AnyAutoRegistrationEngine:
                     )
                     if pwdless and pwdless.get("access_token"):
                         self.session = pwdless.get("session") or self.session
+                        if not has_required_refresh_token(pwdless.get("refresh_token", "")):
+                            return self._build_missing_refresh_token_failure_payload()
                         return {
                             "success": True,
                             "access_token": pwdless.get("access_token", ""),
@@ -554,10 +569,13 @@ class AnyAutoRegistrationEngine:
                     account_id = account_id or str(merged_tokens.get("account_id", "") or "").strip()
                     workspace_id = str(session_result.get("workspace_id", "") or "").strip() or account_id
                     workspace_id = workspace_id or str(merged_tokens.get("workspace_id", "") or "").strip()
+                    refresh_token = merged_tokens.get("refresh_token", "") or session_result.get("refresh_token", "")
+                    if not has_required_refresh_token(refresh_token):
+                        return self._build_missing_refresh_token_failure_payload()
                     return {
                         "success": True,
                         "access_token": merged_tokens.get("access_token", "") or session_result.get("access_token", ""),
-                        "refresh_token": merged_tokens.get("refresh_token", "") or session_result.get("refresh_token", ""),
+                        "refresh_token": refresh_token,
                         "id_token": merged_tokens.get("id_token", "") or session_result.get("id_token", ""),
                         "session_token": session_result.get("session_token", "") or merged_tokens.get("session_token", ""),
                         "account_id": account_id,
@@ -612,6 +630,8 @@ class AnyAutoRegistrationEngine:
                         oauth_client,
                         tokens,
                     )
+                    if not has_required_refresh_token(oauth_payload.get("refresh_token", "")):
+                        return self._build_missing_refresh_token_failure_payload()
                     return {"success": True, **oauth_payload}
 
                 if oauth_client and self._is_phone_required_error(getattr(oauth_client, "last_error", "")):
